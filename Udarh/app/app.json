@@ -1,0 +1,41 @@
+{
+  "expo": {
+    "name": "AirRoute",
+    "slug": "airroute",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.airroute.app",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "AirRoute needs your location to find nearby routes and check air quality.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "AirRoute needs your location to suggest the cleanest route."
+      }
+    },
+
+    "android": {
+      "package": "com.airroute.app",
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "INTERNET"
+      ]
+    },
+
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Allow AirRoute to access your location to recommend healthier routes.",
+          "locationAlwaysAndWhenInUsePermission": "Allow AirRoute to access your location even in the background when needed."
+        }
+      ]
+    ]
+  }
+}
