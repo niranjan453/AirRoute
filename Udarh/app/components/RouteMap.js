@@ -1,6 +1,14 @@
 import React, { useEffect, useMemo, useRef } from "react";
-import { View, StyleSheet } from "react-native";
-import MapView, { Marker, Polyline } from "react-native-maps";
+import { StyleSheet, View } from "react-native";
+import {
+  MapView,
+  Camera,
+  ShapeSource,
+  LineLayer,
+  PointAnnotation,
+  UserLocation,
+} from "@maplibre/maplibre-react-native";
+
 import { decodePolyline } from "../utils/polyline";
 
 const ROUTE_COLORS = {
@@ -9,112 +17,345 @@ const ROUTE_COLORS = {
   High: "#d93025",
 };
 
+const OSM_STYLE = {
+  version: 8,
+
+  sources: {
+    osm: {
+      type: "raster",
+      tiles: [
+        "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+      ],
+      tileSize: 256,
+      attribution:
+        "© OpenStreetMap contributors",
+    },
+  },
+
+  layers: [
+    {
+      id: "osm",
+      type: "raster",
+      source: "osm",
+    },
+  ],
+};
+
 export default function RouteMap({
   routes = [],
   selectedRouteId,
 }) {
-  const mapRef = useRef(null);
+  const cameraRef = useRef(null);
+
+  /*
+   * ------------------------------------------------------------
+   * SELECTED ROUTE
+   * ------------------------------------------------------------
+   */
 
   const selectedRoute =
-    routes.find((r) => r.id === selectedRouteId) ||
+    routes.find((route) => route.id === selectedRouteId) ||
     routes[0] ||
     null;
 
-  const polylines = useMemo(() => {
-    return routes.map((route) => {
-      const coordinates = decodePolyline(route.polyline);
+  /*
+   * ------------------------------------------------------------
+   * DECODE ROUTES
+   * ------------------------------------------------------------
+   */
 
-      console.log("========== ROUTE MAP ==========");
-      console.log("Route:", route.id);
-      console.log("Decoded Points:", coordinates.length);
+  const routeData = useMemo(() => {
+    return routes
+      .map((route) => {
+        const coordinates = decodePolyline(route.polyline);
 
-      if (coordinates.length) {
-        console.log("Start:", coordinates[0]);
-        console.log("End:", coordinates[coordinates.length - 1]);
-      }
+        console.log("========== ROUTE MAP ==========");
+        console.log("Route:", route.id);
+        console.log("Decoded Points:", coordinates.length);
 
-      console.log("===============================");
+        if (coordinates.length > 0) {
+          console.log("Start:", coordinates[0]);
+          console.log(
+            "End:",
+            coordinates[coordinates.length - 1]
+          );
+        }
 
-      return {
-        id: route.id,
-        coordinates,
-        color:
-          route.id === selectedRouteId
-            ? ROUTE_COLORS[route.exposureBand] || "#1A73E8"
-            : "#BDBDBD",
-        width: route.id === selectedRouteId ? 6 : 4,
-      };
-    });
+        console.log("===============================");
+
+        if (coordinates.length < 2) {
+          return null;
+        }
+
+        /*
+         * MapLibre GeoJSON uses:
+         *
+         * [longitude, latitude]
+         *
+         * while our decoder returns:
+         *
+         * { latitude, longitude }
+         */
+
+        const lineCoordinates = coordinates.map(
+          ({ latitude, longitude }) => [
+            longitude,
+            latitude,
+          ]
+        );
+
+        return {
+          id: route.id,
+          exposureBand: route.exposureBand,
+          coordinates,
+          lineCoordinates,
+          color:
+            route.id === selectedRouteId
+              ? ROUTE_COLORS[route.exposureBand] || "#1A73E8"
+              : "#BDBDBD",
+          width:
+            route.id === selectedRouteId
+              ? 6
+              : 4,
+        };
+      })
+      .filter(Boolean);
   }, [routes, selectedRouteId]);
 
+  /*
+   * ------------------------------------------------------------
+   * SELECTED ROUTE COORDINATES
+   * ------------------------------------------------------------
+   */
+
   const selectedCoordinates = useMemo(() => {
-    if (!selectedRoute) return [];
-    return decodePolyline(selectedRoute.polyline);
-  }, [selectedRoute]);
+    const route = routeData.find(
+      (item) => item.id === selectedRouteId
+    );
+
+    if (route) {
+      return route.coordinates;
+    }
+
+    return routeData[0]?.coordinates || [];
+  }, [routeData, selectedRouteId]);
+
+  /*
+   * ------------------------------------------------------------
+   * CAMERA
+   * ------------------------------------------------------------
+   */
 
   useEffect(() => {
-    if (!mapRef.current) return;
+    if (!cameraRef.current) return;
 
-    if (!selectedCoordinates.length) return;
+    if (selectedCoordinates.length < 2) {
+      return;
+    }
 
-    setTimeout(() => {
-      mapRef.current.fitToCoordinates(selectedCoordinates, {
-        edgePadding: {
-          top: 80,
-          right: 60,
-          bottom: 80,
-          left: 60,
-        },
-        animated: true,
-      });
-    }, 600);
+    const coordinates = selectedCoordinates.map(
+      ({ latitude, longitude }) => [
+        longitude,
+        latitude,
+      ]
+    );
+
+    let minLongitude = coordinates[0][0];
+    let maxLongitude = coordinates[0][0];
+    let minLatitude = coordinates[0][1];
+    let maxLatitude = coordinates[0][1];
+
+    coordinates.forEach(([longitude, latitude]) => {
+      minLongitude = Math.min(
+        minLongitude,
+        longitude
+      );
+
+      maxLongitude = Math.max(
+        maxLongitude,
+        longitude
+      );
+
+      minLatitude = Math.min(
+        minLatitude,
+        latitude
+      );
+
+      maxLatitude = Math.max(
+        maxLatitude,
+        latitude
+      );
+    });
+
+    const southwest = [
+      minLongitude,
+      minLatitude,
+    ];
+
+    const northeast = [
+      maxLongitude,
+      maxLatitude,
+    ];
+
+    const timer = setTimeout(() => {
+      cameraRef.current?.fitBounds(
+        northeast,
+        southwest,
+        80,
+        1000
+      );
+    }, 500);
+
+    return () => clearTimeout(timer);
   }, [selectedCoordinates]);
+
+  /*
+   * ------------------------------------------------------------
+   * ORIGIN / DESTINATION
+   * ------------------------------------------------------------
+   */
 
   const initialPoint =
     selectedCoordinates[0] || {
       latitude: 28.6139,
-      longitude: 77.2090,
+      longitude: 77.209,
     };
 
   const destinationPoint =
-    selectedCoordinates[selectedCoordinates.length - 1] ||
-    initialPoint;
+    selectedCoordinates[
+      selectedCoordinates.length - 1
+    ] || initialPoint;
+
+  /*
+   * ------------------------------------------------------------
+   * ROUTE GEOJSON
+   * ------------------------------------------------------------
+   */
+
+  const routeFeatures = useMemo(() => {
+    return routeData.map((route) => ({
+      type: "Feature",
+      id: route.id,
+      properties: {
+        routeId: route.id,
+        color: route.color,
+        width: route.width,
+      },
+      geometry: {
+        type: "LineString",
+        coordinates: route.lineCoordinates,
+      },
+    }));
+  }, [routeData]);
+
+  const routeGeoJSON = useMemo(
+    () => ({
+      type: "FeatureCollection",
+      features: routeFeatures,
+    }),
+    [routeFeatures]
+  );
+
+  /*
+   * ------------------------------------------------------------
+   * RENDER
+   * ------------------------------------------------------------
+   */
 
   return (
     <View style={styles.container}>
       <MapView
-        ref={mapRef}
         style={styles.map}
-        initialRegion={{
-          latitude: initialPoint.latitude,
-          longitude: initialPoint.longitude,
-          latitudeDelta: 0.08,
-          longitudeDelta: 0.08,
-        }}
-        showsUserLocation
-        showsMyLocationButton
+        mapStyle={OSM_STYLE}
+        logoEnabled={true}
+        attributionEnabled={true}
+        compassEnabled={true}
+        zoomEnabled={true}
+        scrollEnabled={true}
+        rotateEnabled={true}
+        pitchEnabled={true}
       >
-        {polylines.map((route) => (
-          <Polyline
-            key={route.id}
-            coordinates={route.coordinates}
-            strokeColor={route.color}
-            strokeWidth={route.width}
-            lineCap="round"
-            lineJoin="round"
-          />
-        ))}
-
-        <Marker
-          coordinate={initialPoint}
-          title="Origin"
-          pinColor="green"
+        <Camera
+          ref={cameraRef}
+          zoomLevel={12}
+          centerCoordinate={[
+            initialPoint.longitude,
+            initialPoint.latitude,
+          ]}
         />
 
-        <Marker
-          coordinate={destinationPoint}
-          title="Destination"
-          pinColor="red"
+        {/*
+         * ------------------------------------------------------
+         * USER LOCATION
+         * ------------------------------------------------------
+         */}
+
+        <UserLocation
+          visible={true}
+          animated={true}
+          androidRenderMode="normal"
+          showsUserHeadingIndicator={true}
+        />
+
+        {/*
+         * ------------------------------------------------------
+         * ROUTES
+         * ------------------------------------------------------
+         */}
+
+        {routeFeatures.length > 0 && (
+          <ShapeSource
+            id="airroute-routes"
+            shape={routeGeoJSON}
+          >
+            <LineLayer
+              id="airroute-route-lines"
+              style={{
+                lineColor: [
+                  "get",
+                  "color",
+                ],
+
+                lineWidth: [
+                  "get",
+                  "width",
+                ],
+
+                lineCap: "round",
+                lineJoin: "round",
+
+                lineOpacity: 0.95,
+              }}
+            />
+          </ShapeSource>
+        )}
+
+        {/*
+         * ------------------------------------------------------
+         * ORIGIN
+         * ------------------------------------------------------
+         */}
+
+        <PointAnnotation
+          id="airroute-origin"
+          coordinate={[
+            initialPoint.longitude,
+            initialPoint.latitude,
+          ]}
+        />
+
+        {/*
+         * ------------------------------------------------------
+         * DESTINATION
+         * ------------------------------------------------------
+         */}
+
+        <PointAnnotation
+          id="airroute-destination"
+          coordinate={[
+            destinationPoint.longitude,
+            destinationPoint.latitude,
+          ]}
         />
       </MapView>
     </View>
