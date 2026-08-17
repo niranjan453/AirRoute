@@ -1,154 +1,857 @@
-const express = require('express');
-const router = express.Router();
+"use strict";
 
-const { PROFILE_SENSITIVITY } = require('../services/exposureScoring');
+const express = require("express");
 
-let routeModuleStore = null;
+const router =
+  express.Router();
+
+// ============================================================
+// AIRROUTE - ADVISORY ROUTE
+// ============================================================
+//
+// DAY 8
+//
+// The advisory endpoint uses the SAME advisory engine used by
+// the main route-ranking flow.
+//
+// Source of truth:
+//
+//   routeAdvisory.js
+//
+// No duplicate advisory logic is maintained here.
+//
+// Architecture:
+//
+//   /routes
+//       ↓
+//   routeAdvisory.js
+//
+//   /advisory
+//       ↓
+//   routeAdvisory.js
+//
+// DAY 8 HARDENING:
+//
+// - Request validation
+// - Route validation
+// - routeId validation
+// - routes collection validation
+// - referenceRoute validation
+// - Standard API errors
+// - Safe production error responses
+// - Ranking engine remains authoritative
+// ============================================================
+
+const {
+  buildRouteAdvisory,
+  buildOverallAdvisory,
+} = require(
+  "../services/advisory/routeAdvisory"
+);
+
+// ============================================================
+// ROUTE STORE
+// ============================================================
+//
+// route.js exposes its in-memory route store through getStore().
+//
+// We use it only when the client provides routeId and does not
+// provide the complete route object.
+//
+// ============================================================
+
+let routeModuleStore =
+  null;
+
 try {
-  const routeMod = require('./route');
-  if (routeMod && routeMod.getStore) routeModuleStore = routeMod.getStore;
-} catch (e) {}
+  const routeModule =
+    require("./route");
 
-router.post('/', (req, res) => {
-  const { routeId, profile = 'normal', route } = req.body;
-
-  let routeData = route;
-  if (!routeData && routeId && routeModuleStore) {
-    routeData = routeModuleStore()[routeId];
+  if (
+    routeModule &&
+    typeof routeModule.getStore ===
+      "function"
+  ) {
+    routeModuleStore =
+      routeModule.getStore;
   }
+} catch (error) {
+  console.warn(
+    "[advisory] Route module store unavailable:",
+    error.message
+  );
+}
 
-  if (!routeData) {
-    return res.status(404).json({
-      error: 'Route not found',
-      message: 'Provide route data in the request body with the "route" field.',
+// ============================================================
+// STANDARD API ERROR
+// ============================================================
+
+function sendApiError(
+  res,
+  status,
+  error,
+  message,
+  extra = {}
+) {
+  return res
+    .status(status)
+    .json({
+      success:
+        false,
+
+      error,
+
+      message,
+
+      ...extra,
     });
+}
+
+// ============================================================
+// GET ROUTE FROM STORE
+// ============================================================
+
+function getStoredRoute(
+  routeId
+) {
+  if (
+    !routeModuleStore ||
+    !routeId
+  ) {
+    return null;
   }
 
-  const profileInfo = PROFILE_SENSITIVITY[profile] || PROFILE_SENSITIVITY.normal;
-  const hotspots = routeData.hotspots || [];
-  const exposureBand = routeData.exposureBand || 'Low';
-  const peakAqi = routeData.peakAqi || 0;
-  const avgAqi = routeData.avgAqi || 0;
-  const durationSeconds = routeData.durationSeconds || 0;
-  const durationMinutes = Math.round(durationSeconds / 60);
-  const distanceKm = (routeData.distanceMeters || 0) / 1000;
-  const hasHotspotWarning =
-    routeData.hasHotspotWarning || (Array.isArray(hotspots) && hotspots.length > 0);
+  try {
+    const store =
+      routeModuleStore();
 
-  const advisory = generateAdvisory({
-    profile,
-    profileInfo,
-    hotspots,
-    exposureBand,
-    peakAqi,
-    avgAqi,
-    durationMinutes,
-    hasHotspotWarning,
-    distanceKm,
-  });
-
-  res.json({
-    routeId: routeId || (routeData && routeData.id),
-    profile,
-    advisory,
-  });
-});
-
-function generateAdvisory({
-  profile, profileInfo, hotspots, exposureBand, peakAqi, avgAqi,
-  durationMinutes, hasHotspotWarning, distanceKm,
-}) {
-  const lines = [];
-  const severity = hasHotspotWarning ? 'high' : exposureBand.toLowerCase();
-
-  if (severity === 'low') {
-    if (profile === 'normal') {
-      lines.push('✅ Air quality is good along this route.');
-      lines.push('No special precautions needed.');
-    } else {
-      lines.push('✅ Air quality is good along this route.');
-      lines.push(`Your ${profileInfo.label.toLowerCase()} profile should be fine. Enjoy the trip.`);
+    if (
+      !store ||
+      typeof store !==
+        "object"
+    ) {
+      return null;
     }
-  } else if (severity === 'moderate') {
-    if (profile === 'normal') {
-      lines.push('ℹ️ Air quality is moderate along this route.');
-      lines.push('If you have respiratory sensitivity, consider a mask.');
-    } else if (profile === 'asthma') {
-      lines.push('ℹ️ Air quality is moderate.');
-      lines.push('As a respiratory patient, wear a mask and carry your inhaler.');
-    } else if (profile === 'child') {
-      lines.push('ℹ️ Air quality is moderate along this route.');
-      lines.push('For children: consider a light mask on sensitive days.');
-    } else {
-      lines.push('ℹ️ Air quality is moderate along this route.');
-      lines.push(`Your ${profileInfo.label.toLowerCase()} profile has elevated sensitivity — stay hydrated.`);
-    }
-  } else {
-    if (profile === 'normal') {
-      lines.push('⚠️ Air quality is poor along part of this route.');
-      lines.push('Consider a mask if you have respiratory sensitivity.');
-    } else if (profile === 'child') {
-      lines.push('⚠️ Air quality is poor along part of this route.');
-      lines.push('For children: use a N95 mask and minimize outdoor walk segments if possible.');
-    } else if (profile === 'elderly') {
-      lines.push('⚠️ Air quality is poor along part of this route.');
-      lines.push('For elderly users: wear a N95 mask and avoid prolonged outdoor exposure.');
-    } else if (profile === 'asthma') {
-      lines.push('⚠️ Air quality is poor along part of this route.');
-      lines.push('Wear a N95 mask and ensure you have your rescue inhaler accessible.');
-      lines.push('If symptoms worsen, seek shelter indoors immediately.');
-    } else if (profile === 'pregnant') {
-      lines.push('⚠️ Air quality is poor along part of this route.');
-      lines.push('Wear a mask and consider limiting exposure duration.');
-    } else {
-      lines.push('⚠️ Air quality is poor along part of this route.');
-      lines.push('Wear a mask and minimize outdoor time where possible.');
-    }
+
+    return (
+      store[routeId] ||
+      null
+    );
+  } catch (error) {
+    console.warn(
+      "[advisory] Could not read route store:",
+      error.message
+    );
+
+    return null;
+  }
+}
+
+// ============================================================
+// GET ROUTE ID
+// ============================================================
+
+function getRouteId(
+  route
+) {
+  if (
+    !route ||
+    typeof route !==
+      "object" ||
+    Array.isArray(route)
+  ) {
+    return null;
   }
 
-  if (hotspots.length > 0) {
-    lines.push('');
-    lines.push(`🚨 ${hotspots.length} hotspot segment${hotspots.length > 1 ? 's' : ''} detected:`);
-    hotspots.forEach((hs, i) => {
-      const progressPct = distanceKm > 0
-        ? Math.min(100, Math.round((hs.startDistance / 1000) / distanceKm * 100))
-        : 50;
-      const estArrivalMin = Math.max(0, Math.round((progressPct / 100) * durationMinutes));
-      lines.push(
-        `   • Segment ${i + 1}: Peak AQI ${hs.peakAqi} (${aqiLabel(hs.peakAqi)}) ` +
-        `around ${(hs.startDistance / 1000).toFixed(1)}km into the route (ETA ~${estArrivalMin} min)`
-      );
-    });
+  return (
+    route.routeId ??
+    route.id ??
+    null
+  );
+}
+
+// ============================================================
+// ROUTE OBJECT VALIDATION
+// ============================================================
+//
+// A route must be a plain object.
+//
+// Arrays, strings, numbers, null, etc. are invalid.
+//
+// ============================================================
+
+function isValidRouteObject(
+  route
+) {
+  return (
+    route !== null &&
+    typeof route ===
+      "object" &&
+    !Array.isArray(route)
+  );
+}
+
+// ============================================================
+// ROUTE ID VALIDATION
+// ============================================================
+
+function normalizeRouteId(
+  routeId
+) {
+  if (
+    typeof routeId !==
+    "string"
+  ) {
+    return null;
   }
 
-  lines.push('');
-  lines.push('📊 Route AQI summary:');
-  lines.push(`   • Average AQI: ${avgAqi} (${aqiLabel(avgAqi)})`);
-  lines.push(`   • Peak AQI: ${peakAqi} (${aqiLabel(peakAqi)})`);
-  lines.push(`   • Distance: ${distanceKm.toFixed(1)} km`);
-  lines.push(`   • Travel time: ~${durationMinutes} min`);
-  lines.push(`   • Exposure level: ${exposureBand}`);
-  lines.push(`   • Profile sensitivity: ${profileInfo.label} (hotspot threshold AQI > ${profileInfo.hotSpotThreshold})`);
+  const normalized =
+    routeId.trim();
 
-  if (hasHotspotWarning) {
-    lines.push('');
-    lines.push(
-      '💡 Tip: The recommended route already minimizes exposure. ' +
-      'If you have concerns, consider rescheduling travel or using a mode of transport ' +
-      'with closed windows and cabin air filtration (e.g., AC vehicle with recirculation).'
+  return normalized
+    ? normalized
+    : null;
+}
+
+// ============================================================
+// PROFILE NORMALIZATION
+// ============================================================
+//
+// Advisory-specific profile validation is intentionally not
+// duplicated here because the authoritative profile definitions
+// live elsewhere in the route/exposure system.
+//
+// We normalize the value consistently.
+//
+// ============================================================
+
+function normalizeProfile(
+  profile
+) {
+  return String(
+    profile ||
+      "normal"
+  )
+    .trim()
+    .toLowerCase();
+}
+
+// ============================================================
+// REQUEST BODY VALIDATION
+// ============================================================
+
+function validateRequestBody(
+  body
+) {
+  if (
+    body === null ||
+    body === undefined
+  ) {
+    return {
+      valid: false,
+
+      error:
+        "INVALID_REQUEST_BODY",
+
+      message:
+        "Request body is required.",
+    };
+  }
+
+  if (
+    typeof body !==
+      "object" ||
+    Array.isArray(body)
+  ) {
+    return {
+      valid: false,
+
+      error:
+        "INVALID_REQUEST_BODY",
+
+      message:
+        "Request body must be a JSON object.",
+    };
+  }
+
+  return {
+    valid: true,
+  };
+}
+
+// ============================================================
+// VALIDATE REFERENCE ROUTE
+// ============================================================
+
+function validateReferenceRoute(
+  referenceRoute
+) {
+  if (
+    referenceRoute ===
+      undefined ||
+    referenceRoute ===
+      null
+  ) {
+    return {
+      valid: true,
+
+      value: null,
+    };
+  }
+
+  if (
+    !isValidRouteObject(
+      referenceRoute
+    )
+  ) {
+    return {
+      valid: false,
+
+      error:
+        "INVALID_REFERENCE_ROUTE",
+
+      message:
+        "referenceRoute must be a valid route object.",
+    };
+  }
+
+  return {
+    valid: true,
+
+    value:
+      referenceRoute,
+  };
+}
+
+// ============================================================
+// VALIDATE ROUTE COLLECTION
+// ============================================================
+
+function validateRouteCollection(
+  routes
+) {
+  if (
+    routes ===
+      undefined ||
+    routes ===
+      null
+  ) {
+    return {
+      valid: true,
+
+      value: null,
+    };
+  }
+
+  if (
+    !Array.isArray(
+      routes
+    )
+  ) {
+    return {
+      valid: false,
+
+      error:
+        "INVALID_ROUTES",
+
+      message:
+        "routes must be an array.",
+    };
+  }
+
+  if (
+    routes.length ===
+    0
+  ) {
+    return {
+      valid: false,
+
+      error:
+        "INVALID_ROUTES",
+
+      message:
+        "routes must contain at least one route.",
+    };
+  }
+
+  const invalidIndex =
+    routes.findIndex(
+      (item) =>
+        !isValidRouteObject(
+          item
+        )
+    );
+
+  if (
+    invalidIndex !==
+    -1
+  ) {
+    return {
+      valid: false,
+
+      error:
+        "INVALID_ROUTES",
+
+      message:
+        `routes[${invalidIndex}] must be a valid route object.`,
+    };
+  }
+
+  return {
+    valid: true,
+
+    value:
+      routes,
+  };
+}
+
+// ============================================================
+// FIND RECOMMENDED ROUTE
+// ============================================================
+//
+// IMPORTANT:
+//
+// This endpoint does NOT decide recommendation based on array
+// position or rank.
+//
+// The ranking engine remains authoritative.
+//
+// ============================================================
+
+function findRecommendedRoute(
+  routeCollection,
+  fallbackRoute
+) {
+  if (
+    !Array.isArray(
+      routeCollection
+    )
+  ) {
+    return (
+      fallbackRoute ||
+      null
     );
   }
 
-  return lines.join('\n');
+  const recommended =
+    routeCollection.find(
+      (item) =>
+        item?.isRecommended ===
+          true ||
+        item?.recommended ===
+          true
+    );
+
+  return (
+    recommended ||
+    fallbackRoute ||
+    null
+  );
 }
 
-function aqiLabel(aqi) {
-  if (aqi <= 50) return 'Good';
-  if (aqi <= 100) return 'Moderate';
-  if (aqi <= 150) return 'Unhealthy for Sensitive Groups';
-  if (aqi <= 200) return 'Unhealthy';
-  if (aqi <= 300) return 'Very Unhealthy';
-  return 'Hazardous';
-}
+// ============================================================
+// POST /
+// ============================================================
+//
+// Supported request:
+//
+// {
+//   "routeId": "route-0-123",
+//   "profile": "normal"
+// }
+//
+// OR:
+//
+// {
+//   "route": { ... },
+//   "profile": "normal"
+// }
+//
+// OR:
+//
+// {
+//   "routeId": "route-0-123",
+//   "route": { ... },
+//   "profile": "normal"
+// }
+//
+// OR:
+//
+// {
+//   "route": { ... },
+//   "routes": [ ... ],
+//   "referenceRoute": { ... },
+//   "profile": "normal"
+// }
+//
+// ============================================================
 
-module.exports = router;
+router.post(
+  "/",
+  (
+    req,
+    res
+  ) => {
+    try {
+      // --------------------------------------------------------
+      // REQUEST BODY
+      // --------------------------------------------------------
+
+      const body =
+        req.body;
+
+      const bodyValidation =
+        validateRequestBody(
+          body
+        );
+
+      if (
+        !bodyValidation.valid
+      ) {
+        return sendApiError(
+          res,
+          400,
+          bodyValidation.error,
+          bodyValidation.message
+        );
+      }
+
+      const {
+        routeId:
+          rawRouteId,
+        profile =
+          "normal",
+        route,
+        referenceRoute,
+        routes,
+      } = body;
+
+      // --------------------------------------------------------
+      // NORMALIZE ROUTE ID
+      // --------------------------------------------------------
+
+      const routeId =
+        normalizeRouteId(
+          rawRouteId
+        );
+
+      // --------------------------------------------------------
+      // ROUTE ID TYPE VALIDATION
+      // --------------------------------------------------------
+
+      if (
+        rawRouteId !==
+          undefined &&
+        rawRouteId !==
+          null &&
+        routeId ===
+          null
+      ) {
+        return sendApiError(
+          res,
+          400,
+          "INVALID_ROUTE_ID",
+          "routeId must be a non-empty string."
+        );
+      }
+
+      // --------------------------------------------------------
+      // ROUTE OBJECT VALIDATION
+      // --------------------------------------------------------
+
+      if (
+        route !==
+          undefined &&
+        route !==
+          null &&
+        !isValidRouteObject(
+          route
+        )
+      ) {
+        return sendApiError(
+          res,
+          400,
+          "INVALID_ROUTE",
+          "route must be a valid route object."
+        );
+      }
+
+      // --------------------------------------------------------
+      // REFERENCE ROUTE VALIDATION
+      // --------------------------------------------------------
+
+      const referenceValidation =
+        validateReferenceRoute(
+          referenceRoute
+        );
+
+      if (
+        !referenceValidation.valid
+      ) {
+        return sendApiError(
+          res,
+          400,
+          referenceValidation.error,
+          referenceValidation.message
+        );
+      }
+
+      // --------------------------------------------------------
+      // ROUTE COLLECTION VALIDATION
+      // --------------------------------------------------------
+
+      const routesValidation =
+        validateRouteCollection(
+          routes
+        );
+
+      if (
+        !routesValidation.valid
+      ) {
+        return sendApiError(
+          res,
+          400,
+          routesValidation.error,
+          routesValidation.message
+        );
+      }
+
+      const routeCollection =
+        routesValidation.value;
+
+      // --------------------------------------------------------
+      // RESOLVE ROUTE
+      // --------------------------------------------------------
+
+      let routeData =
+        route || null;
+
+      // --------------------------------------------------------
+      // STORED ROUTE FALLBACK
+      // --------------------------------------------------------
+
+      if (
+        !routeData &&
+        routeId
+      ) {
+        routeData =
+          getStoredRoute(
+            routeId
+          );
+      }
+
+      // --------------------------------------------------------
+      // ROUTE NOT FOUND
+      // --------------------------------------------------------
+
+      if (
+        !routeData
+      ) {
+        return sendApiError(
+          res,
+          404,
+          "ROUTE_NOT_FOUND",
+          'Provide route data in the request body with the "route" field or provide a valid "routeId".'
+        );
+      }
+
+      // --------------------------------------------------------
+      // FINAL ROUTE VALIDATION
+      // --------------------------------------------------------
+
+      if (
+        !isValidRouteObject(
+          routeData
+        )
+      ) {
+        return sendApiError(
+          res,
+          400,
+          "INVALID_ROUTE",
+          "The resolved route is not a valid route object."
+        );
+      }
+
+      // --------------------------------------------------------
+      // NORMALIZE PROFILE
+      // --------------------------------------------------------
+
+      const normalizedProfile =
+        normalizeProfile(
+          profile
+        );
+
+      // --------------------------------------------------------
+      // OVERALL ADVISORY
+      // --------------------------------------------------------
+      //
+      // If a complete route collection is supplied, use the
+      // shared overall advisory engine.
+      //
+      // Recommendation remains authoritative from the route
+      // ranking result.
+      //
+      // We never assume routes[0] is recommended.
+      // --------------------------------------------------------
+
+      if (
+        Array.isArray(
+          routeCollection
+        ) &&
+        routeCollection.length >
+          0
+      ) {
+        const recommendedRoute =
+          findRecommendedRoute(
+            routeCollection,
+            routeData
+          );
+
+        // ------------------------------------------------------
+        // Safety validation
+        // ------------------------------------------------------
+
+        if (
+          !isValidRouteObject(
+            recommendedRoute
+          )
+        ) {
+          return sendApiError(
+            res,
+            400,
+            "INVALID_RECOMMENDED_ROUTE",
+            "Unable to identify a valid recommended route."
+          );
+        }
+
+        const advisory =
+          buildOverallAdvisory(
+            routeCollection,
+            recommendedRoute
+          );
+
+        return res.json({
+          success:
+            true,
+
+          routeId:
+            routeId ||
+            getRouteId(
+              routeData
+            ),
+
+          profile:
+            normalizedProfile,
+
+          advisory,
+        });
+      }
+
+      // --------------------------------------------------------
+      // SINGLE-ROUTE ADVISORY
+      // --------------------------------------------------------
+      //
+      // If an explicit referenceRoute was supplied, it is used
+      // for travel-time / exposure trade-off explanation.
+      //
+      // Otherwise the advisory engine explains the supplied
+      // route directly.
+      // --------------------------------------------------------
+
+      const advisory =
+        buildRouteAdvisory(
+          routeData,
+          {
+            profile:
+              normalizedProfile,
+
+            referenceRoute:
+              referenceValidation.value,
+          }
+        );
+
+      // --------------------------------------------------------
+      // RESPONSE
+      // --------------------------------------------------------
+
+      return res.json({
+        success:
+          true,
+
+        routeId:
+          routeId ||
+          getRouteId(
+            routeData
+          ),
+
+        profile:
+          normalizedProfile,
+
+        advisory,
+      });
+    } catch (error) {
+      console.error(
+        "[advisory] Advisory generation failed:",
+        error
+      );
+
+      // --------------------------------------------------------
+      // DAY 8:
+      // Do not expose internal error details in the API.
+      //
+      // Detailed error remains in server logs.
+      // --------------------------------------------------------
+
+      return sendApiError(
+        res,
+        500,
+        "ADVISORY_GENERATION_FAILED",
+        "Unable to generate route advisory right now."
+      );
+    }
+  }
+);
+
+// ============================================================
+// GET /
+// ============================================================
+//
+// Optional health/info endpoint.
+//
+// Does not calculate an advisory.
+// ============================================================
+
+router.get(
+  "/",
+  (
+    req,
+    res
+  ) => {
+    return res.json({
+      success:
+        true,
+
+      service:
+        "AirRoute Route Advisory",
+
+      status:
+        "operational",
+
+      advisoryEngine:
+        "routeAdvisory",
+
+      architecture:
+        "shared-advisory-engine",
+
+      providerArchitecture:
+        "OpenAQ primary / WAQI fallback",
+    });
+  }
+);
+
+// ============================================================
+// EXPORT
+// ============================================================
+
+module.exports =
+  router;

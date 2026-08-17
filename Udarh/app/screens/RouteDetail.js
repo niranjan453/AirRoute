@@ -1,1370 +1,2701 @@
-import React, { useState, useEffect, useMemo, useRef } from "react";
+// screens/RouteDetail.js
+
+import React, {
+  useMemo,
+} from "react";
+
 import {
+  SafeAreaView,
+  ScrollView,
   View,
   Text,
   StyleSheet,
-  ScrollView,
-  SafeAreaView,
-  TouchableOpacity,
-  Switch,
-  ActivityIndicator,
 } from "react-native";
 
-import {
-  MapView,
-  Camera,
-  ShapeSource,
-  LineLayer,
-  CircleLayer,
-  UserLocation,
-  PointAnnotation,
-} from "@maplibre/maplibre-react-native";
+import RouteMap from "../components/RouteMap";
 
-import AdvisoryModal from "../components/AdvisoryModal";
-import AqiHeatmapLayer from "../components/AqiHeatmapLayer";
-import api from "../services/api";
-import { useUserProfile } from "../context/UserProfileContext";
-import { decodePolyline } from "../utils/polyline";
+// ============================================================
+// HELPERS
+// ============================================================
 
-/*
- * ------------------------------------------------------------
- * OPENSTREETMAP STYLE
- * ------------------------------------------------------------
- */
-
-const OSM_STYLE = {
-  version: 8,
-
-  sources: {
-    osm: {
-      type: "raster",
-      tiles: [
-        "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-      ],
-      tileSize: 256,
-      attribution: "© OpenStreetMap contributors",
-    },
-  },
-
-  layers: [
-    {
-      id: "osm",
-      type: "raster",
-      source: "osm",
-    },
-  ],
-};
-
-/*
- * ------------------------------------------------------------
- * AQI HELPERS
- * ------------------------------------------------------------
- */
-
-function aqiToColor(aqi, opacity = 0.6) {
-  if (aqi <= 50) {
-    return `rgba(0, 228, 0, ${opacity})`;
+function isValidNumber(value) {
+  if (
+    value === null ||
+    value === undefined ||
+    value === ""
+  ) {
+    return false;
   }
 
-  if (aqi <= 100) {
-    return `rgba(255, 255, 0, ${opacity})`;
-  }
-
-  if (aqi <= 150) {
-    return `rgba(255, 126, 0, ${opacity})`;
-  }
-
-  if (aqi <= 200) {
-    return `rgba(255, 0, 0, ${opacity})`;
-  }
-
-  if (aqi <= 300) {
-    return `rgba(143, 63, 151, ${opacity})`;
-  }
-
-  return `rgba(126, 0, 35, ${opacity})`;
+  return Number.isFinite(
+    Number(value)
+  );
 }
 
-function aqiLabel(aqi) {
-  if (aqi <= 50) return "Good";
-  if (aqi <= 100) return "Moderate";
-  if (aqi <= 150) return "Sensitive";
-  if (aqi <= 200) return "Unhealthy";
-  if (aqi <= 300) return "Very Unhealthy";
+function formatDistance(meters) {
+  if (!isValidNumber(meters)) {
+    return "—";
+  }
+
+  const value = Number(meters);
+
+  if (value >= 1000) {
+    return `${(
+      value / 1000
+    ).toFixed(2)} km`;
+  }
+
+  return `${Math.round(value)} m`;
+}
+
+function formatDuration(seconds) {
+  if (!isValidNumber(seconds)) {
+    return "—";
+  }
+
+  const value = Number(seconds);
+
+  const minutes = Math.round(
+    value / 60
+  );
+
+  if (minutes < 60) {
+    return `${minutes} min`;
+  }
+
+  const hours = Math.floor(
+    minutes / 60
+  );
+
+  const remaining =
+    minutes % 60;
+
+  if (remaining === 0) {
+    return `${hours}h`;
+  }
+
+  return `${hours}h ${remaining}m`;
+}
+
+// ============================================================
+// AQI
+// ============================================================
+
+function getAqiColor(aqi) {
+  if (!isValidNumber(aqi)) {
+    return "#9AA0A6";
+  }
+
+  const value = Number(aqi);
+
+  if (value >= 300) {
+    return "#7E0023";
+  }
+
+  if (value >= 200) {
+    return "#8F3F97";
+  }
+
+  if (value >= 150) {
+    return "#D93025";
+  }
+
+  if (value >= 100) {
+    return "#E37400";
+  }
+
+  if (value > 50) {
+    return "#F9AB00";
+  }
+
+  return "#1E8E3E";
+}
+
+function getAqiLabel(aqi) {
+  if (!isValidNumber(aqi)) {
+    return "Unknown";
+  }
+
+  const value = Number(aqi);
+
+  if (value <= 50) {
+    return "Good";
+  }
+
+  if (value <= 100) {
+    return "Moderate";
+  }
+
+  if (value <= 150) {
+    return "Unhealthy for sensitive groups";
+  }
+
+  if (value <= 200) {
+    return "Unhealthy";
+  }
+
+  if (value <= 300) {
+    return "Very unhealthy";
+  }
 
   return "Hazardous";
 }
 
-/*
- * ------------------------------------------------------------
- * AQI MAP COLOR EXPRESSION
- * ------------------------------------------------------------
- */
-
-function getAqiColorExpression() {
-  return [
-    "step",
-    ["get", "aqi"],
-
-    "rgba(0, 228, 0, 0.50)",
-
-    50,
-    "rgba(255, 255, 0, 0.50)",
-
-    100,
-    "rgba(255, 126, 0, 0.50)",
-
-    150,
-    "rgba(255, 0, 0, 0.50)",
-
-    200,
-    "rgba(143, 63, 151, 0.50)",
-
-    300,
-    "rgba(126, 0, 35, 0.50)",
-  ];
-}
-
-/*
- * ------------------------------------------------------------
- * ROUTE DETAIL
- * ------------------------------------------------------------
- */
-
-export default function RouteDetail({ route, navigation }) {
-  const { profile } = useUserProfile();
-
-  const params = route.params || {};
-
-  const routeData = params.route;
-
-  const allRoutes = params.allRoutes || [];
-
-  const [showHeatmap, setShowHeatmap] = useState(false);
-
-  const [advisoryVisible, setAdvisoryVisible] =
-    useState(false);
-
-  const [gridData, setGridData] = useState([]);
-
-  const [loadingGrid, setLoadingGrid] =
-    useState(false);
-
-  const cameraRef = useRef(null);
-
-  /*
-   * ----------------------------------------------------------
-   * ROUTE COORDINATES
-   * ----------------------------------------------------------
-   */
-
-  const routeCoords = useMemo(() => {
-    return decodePolyline(
-      routeData?.polyline || ""
-    );
-  }, [routeData]);
-
-  /*
-   * ----------------------------------------------------------
-   * ROUTE GEOJSON
-   * ----------------------------------------------------------
-   */
-
-  const routeGeoJSON = useMemo(() => {
-    if (routeCoords.length < 2) {
-      return null;
-    }
-
-    const coordinates = routeCoords.map(
-      ({ latitude, longitude }) => [
-        longitude,
-        latitude,
-      ]
-    );
-
-    return {
-      type: "Feature",
-      properties: {
-        routeId: routeData?.id || "selected-route",
-      },
-      geometry: {
-        type: "LineString",
-        coordinates,
-      },
-    };
-  }, [routeCoords, routeData]);
-
-  /*
-   * ----------------------------------------------------------
-   * FIT CAMERA TO ROUTE
-   * ----------------------------------------------------------
-   */
-
-  useEffect(() => {
-    if (!routeCoords.length) {
-      return;
-    }
-
-    if (!cameraRef.current) {
-      return;
-    }
-
-    if (routeCoords.length < 2) {
-      return;
-    }
-
-    const coordinates = routeCoords.map(
-      ({ latitude, longitude }) => [
-        longitude,
-        latitude,
-      ]
-    );
-
-    let minLongitude = coordinates[0][0];
-    let maxLongitude = coordinates[0][0];
-
-    let minLatitude = coordinates[0][1];
-    let maxLatitude = coordinates[0][1];
-
-    coordinates.forEach(
-      ([longitude, latitude]) => {
-        minLongitude = Math.min(
-          minLongitude,
-          longitude
-        );
-
-        maxLongitude = Math.max(
-          maxLongitude,
-          longitude
-        );
-
-        minLatitude = Math.min(
-          minLatitude,
-          latitude
-        );
-
-        maxLatitude = Math.max(
-          maxLatitude,
-          latitude
-        );
-      }
-    );
-
-    const southwest = [
-      minLongitude,
-      minLatitude,
-    ];
-
-    const northeast = [
-      maxLongitude,
-      maxLatitude,
-    ];
-
-    const timer = setTimeout(() => {
-      cameraRef.current?.fitBounds(
-        northeast,
-        southwest,
-        40,
-        800
-      );
-    }, 500);
-
-    return () => clearTimeout(timer);
-  }, [routeCoords]);
-
-  /*
-   * ----------------------------------------------------------
-   * LOAD AQI GRID
-   * ----------------------------------------------------------
-   */
-
-  useEffect(() => {
-    if (
-      showHeatmap &&
-      gridData.length === 0
-    ) {
-      loadGrid();
-    }
-  }, [showHeatmap]);
-
-  const loadGrid = async () => {
-    setLoadingGrid(true);
-
-    try {
-      const resp = await api.getAqiGrid();
-
-      setGridData(resp.grid || []);
-    } catch (err) {
-      console.error(
-        "Grid load error:",
-        err
-      );
-    } finally {
-      setLoadingGrid(false);
-    }
-  };
-
-  /*
-   * ----------------------------------------------------------
-   * EMPTY STATE
-   * ----------------------------------------------------------
-   */
-
-  if (!routeData) {
+function getAqiCategoryLabel(
+  category,
+  aqi
+) {
+  if (
+    category &&
+    typeof category ===
+      "object"
+  ) {
     return (
-      <View style={styles.emptyContainer}>
-        <Text style={styles.emptyTitle}>
-          No route selected
-        </Text>
-
-        <TouchableOpacity
-          onPress={() => navigation.goBack()}
-        >
-          <Text style={styles.backLink}>
-            ← Go back
-          </Text>
-        </TouchableOpacity>
-      </View>
+      category.label ||
+      getAqiLabel(aqi)
     );
   }
 
-  /*
-   * ----------------------------------------------------------
-   * PROFILE / HOTSPOT THRESHOLD
-   * ----------------------------------------------------------
-   */
+  if (
+    typeof category === "string" &&
+    category.trim()
+  ) {
+    return category;
+  }
 
-  const profileType =
-    profile?.type || "normal";
+  return getAqiLabel(aqi);
+}
 
-  const hotspotThreshold =
-    profileType === "normal"
-      ? 200
-      : profileType === "pregnant"
-        ? 175
-        : 150;
+// ============================================================
+// NUMBER FORMATTERS
+// ============================================================
 
-  /*
-   * ----------------------------------------------------------
-   * ROUTE DATA
-   * ----------------------------------------------------------
-   */
+function formatNumber(
+  value,
+  decimals = 0
+) {
+  if (!isValidNumber(value)) {
+    return "—";
+  }
 
-  const aqiPoints =
-    routeData.sampledAqiPoints || [];
-
-  const hotspots =
-    routeData.hotspots || [];
-
-  const totalDistanceKm =
-    (routeData.distanceMeters || 0) / 1000;
-
-  const durationMin = Math.round(
-    (routeData.durationSeconds || 0) / 60
+  return Number(value).toFixed(
+    decimals
   );
+}
 
-  /*
-   * ----------------------------------------------------------
-   * AQI TIMELINE
-   * ----------------------------------------------------------
-   */
+function formatPercent(value) {
+  if (!isValidNumber(value)) {
+    return "—";
+  }
 
-  const timelineSegments =
-    aqiPoints.map((pt, i) => {
-      const progressKm =
-        pt.distanceAlongRoute / 1000;
+  return `${Number(value).toFixed(
+    1
+  )}%`;
+}
 
-      const progressPercent =
-        totalDistanceKm > 0
-          ? (progressKm / totalDistanceKm) * 100
-          : 0;
+// ============================================================
+// EXPOSURE
+// ============================================================
 
-      const etaMin = Math.round(
-        (progressPercent / 100) *
-          durationMin
-      );
+function getExposureColor(
+  band
+) {
+  const normalized = String(
+    band || ""
+  ).toLowerCase();
 
-      const isHotspot =
-        pt.aqi > hotspotThreshold;
+  if (
+    normalized.includes(
+      "critical"
+    )
+  ) {
+    return "#B31412";
+  }
 
-      return {
-        ...pt,
-        i,
-        progressPercent,
-        etaMin,
-        isHotspot,
-      };
-    });
+  if (
+    normalized.includes("high")
+  ) {
+    return "#D93025";
+  }
 
-  /*
-   * ----------------------------------------------------------
-   * START / END
-   * ----------------------------------------------------------
-   */
+  if (
+    normalized.includes(
+      "moderate"
+    )
+  ) {
+    return "#E37400";
+  }
 
-  const startCoord =
-    routeCoords[0] || {
-      latitude: 28.6,
-      longitude: 77.2,
-    };
+  return "#1E8E3E";
+}
 
-  const endCoord =
-    routeCoords[
-      routeCoords.length - 1
-    ] || startCoord;
+function getExposureBackground(
+  band
+) {
+  const normalized = String(
+    band || ""
+  ).toLowerCase();
 
-  /*
-   * ----------------------------------------------------------
-   * HOTSPOT GEOJSON
-   * ----------------------------------------------------------
-   */
+  if (
+    normalized.includes(
+      "critical"
+    ) ||
+    normalized.includes("high")
+  ) {
+    return "#FCE8E6";
+  }
 
-  const hotspotGeoJSON = useMemo(() => {
-    const points = aqiPoints
-      .filter(
-        (point) =>
-          typeof point?.lat === "number" &&
-          typeof point?.lng === "number" &&
-          typeof point?.aqi === "number" &&
-          point.aqi > 150
+  if (
+    normalized.includes(
+      "moderate"
+    )
+  ) {
+    return "#FEF7E0";
+  }
+
+  return "#E6F4EA";
+}
+
+// ============================================================
+// COMPONENT
+// ============================================================
+
+export default function RouteDetail({
+  route,
+}) {
+  // ==========================================================
+  // NAVIGATION DATA
+  // ==========================================================
+
+  const routeData =
+    route?.params?.route ||
+    route ||
+    {};
+
+  const allRoutes =
+    Array.isArray(
+      route?.params?.allRoutes
+    )
+      ? route.params.allRoutes
+      : [routeData];
+
+  const routeResponse =
+    route?.params?.routeResponse ||
+    null;
+
+  // ==========================================================
+  // SELECTED ROUTE ID
+  // ==========================================================
+
+  const selectedRouteId =
+    routeData?.routeId ||
+    routeData?.id ||
+    null;
+
+  // ==========================================================
+  // BASIC ROUTE DATA
+  // ==========================================================
+
+  const distance =
+    routeData?.distance?.meters ??
+    routeData?.distanceMeters;
+
+  const duration =
+    routeData?.duration?.seconds ??
+    routeData?.durationSeconds;
+
+  // ==========================================================
+  // AIR QUALITY
+  // ==========================================================
+
+  const averageAqi =
+    routeData?.airQuality
+      ?.averageAqi ??
+    routeData?.aqiSummary
+      ?.averageAqi ??
+    routeData?.avgAqi ??
+    routeData?.averageAqi ??
+    routeData?.aqi;
+
+  const peakAqi =
+    routeData?.airQuality
+      ?.peakAqi ??
+    routeData?.aqiSummary
+      ?.peakAqi ??
+    routeData?.peakAqi;
+
+  const coverage =
+    routeData?.airQuality
+      ?.coverage ??
+    routeData?.aqiSummary
+      ?.coverage ??
+    routeData?.coverage;
+
+  // ==========================================================
+  // EXPOSURE
+  // ==========================================================
+
+  const exposureScore =
+    routeData?.exposure?.score ??
+    routeData?.exposureScore ??
+    routeData?.exposureIndex;
+
+  const exposurePerHour =
+    routeData?.exposure?.perHour ??
+    routeData?.exposureScorePerHour;
+
+  const rawExposureBand =
+    routeData?.exposure?.band ??
+    routeData?.exposureBand ??
+    "Unknown";
+
+  const exposureBand =
+    typeof rawExposureBand ===
+    "object"
+      ? rawExposureBand?.label ||
+        "Unknown"
+      : rawExposureBand;
+
+  // ==========================================================
+  // RECOMMENDATION
+  // ==========================================================
+
+  const recommended =
+    routeData?.recommended === true;
+
+  // ==========================================================
+  // DETOUR
+  // ==========================================================
+
+  const detourPercent =
+    Number(
+      routeData?.detour?.percent ??
+        routeData?.detourPercent
+    );
+
+  const detourAcceptable =
+    routeData?.detour
+      ?.acceptable !== false;
+
+  // ==========================================================
+  // HOTSPOTS
+  // ==========================================================
+
+  const hotspots = useMemo(() => {
+    if (
+      Array.isArray(
+        routeData?.hotspots?.items
       )
-      .slice(0, 20);
+    ) {
+      return routeData.hotspots.items;
+    }
 
-    return {
-      type: "FeatureCollection",
+    if (
+      Array.isArray(
+        routeData?.hotspots
+      )
+    ) {
+      return routeData.hotspots;
+    }
 
-      features: points.map(
-        (point, index) => ({
-          type: "Feature",
+    return [];
+  }, [routeData]);
 
-          id: `route-hotspot-${index}`,
+  const hotspotCount =
+    Number(
+      routeData?.hotspots?.count ??
+        hotspots.length
+    ) || 0;
 
-          properties: {
-            aqi: point.aqi,
+  const hotspotPeak =
+    isValidNumber(
+      routeData?.hotspots?.peakAqi
+    )
+      ? Number(
+          routeData.hotspots.peakAqi
+        )
+      : null;
 
-            isHotspot:
-              point.aqi >
-              hotspotThreshold,
-          },
+  const hotspotDuration =
+    isValidNumber(
+      routeData?.hotspots
+        ?.durationMinutes
+    )
+      ? Number(
+          routeData.hotspots
+            .durationMinutes
+        )
+      : null;
 
-          geometry: {
-            type: "Point",
+  const hotspotShare =
+    isValidNumber(
+      routeData?.hotspots
+        ?.exposureSharePercent
+    )
+      ? Number(
+          routeData.hotspots
+            .exposureSharePercent
+        )
+      : null;
 
-            coordinates: [
-              point.lng,
-              point.lat,
-            ],
-          },
-        })
-      ),
-    };
-  }, [
-    aqiPoints,
-    hotspotThreshold,
-  ]);
+  const criticalHotspot =
+    routeData?.hotspots
+      ?.critical === true ||
+    routeData?.detour
+      ?.criticalHotspot === true ||
+    hotspots.some(
+      (item) =>
+        item?.critical === true
+    );
 
-  /*
-   * ----------------------------------------------------------
-   * RENDER
-   * ----------------------------------------------------------
-   */
+  // ==========================================================
+  // ADVISORY
+  // ==========================================================
+
+  const advisory =
+    routeData?.advisory ||
+    routeResponse?.advisory ||
+    null;
+
+  // ==========================================================
+  // AQI SEGMENTS
+  // ==========================================================
+
+  const aqiSegments =
+    useMemo(() => {
+      if (
+        Array.isArray(
+          routeData?.airQuality
+            ?.segments
+        )
+      ) {
+        return routeData.airQuality
+          .segments;
+      }
+
+      if (
+        Array.isArray(
+          routeData?.aqiSegments
+        )
+      ) {
+        return routeData.aqiSegments;
+      }
+
+      return [];
+    }, [routeData]);
+
+  // ==========================================================
+  // AQI LABELS
+  // ==========================================================
+
+  const averageAqiLabel =
+    getAqiLabel(averageAqi);
+
+  const peakAqiLabel =
+    getAqiLabel(peakAqi);
+
+  // ==========================================================
+  // EXPOSURE COLORS
+  // ==========================================================
+
+  const exposureColor =
+    getExposureColor(
+      exposureBand
+    );
+
+  const exposureBackground =
+    getExposureBackground(
+      exposureBand
+    );
+
+  // ==========================================================
+  // RENDER
+  // ==========================================================
 
   return (
-    <SafeAreaView style={styles.container}>
-      <View style={styles.mapContainer}>
-        <MapView
-          style={styles.map}
-          mapStyle={OSM_STYLE}
-          logoEnabled={true}
-          attributionEnabled={true}
-          compassEnabled={true}
-          zoomEnabled={true}
-          scrollEnabled={true}
-          rotateEnabled={true}
-          pitchEnabled={true}
+    <SafeAreaView
+      style={styles.container}
+    >
+      <ScrollView
+        contentContainerStyle={
+          styles.content
+        }
+        showsVerticalScrollIndicator={
+          false
+        }
+      >
+        {/* ==================================================
+            SELECTED ROUTE MAP
+            ================================================== */}
+
+        <View
+          style={
+            styles.mapSection
+          }
         >
-          <Camera
-            ref={cameraRef}
-            zoomLevel={12}
-            centerCoordinate={[
-              startCoord.longitude,
-              startCoord.latitude,
-            ]}
-          />
-
-          {/*
-           * ------------------------------------------------
-           * USER LOCATION
-           * ------------------------------------------------
-           */}
-
-          <UserLocation
-            visible={true}
-            animated={true}
-            androidRenderMode="normal"
-            showsUserHeadingIndicator={true}
-          />
-
-          {/*
-           * ------------------------------------------------
-           * AQI HEATMAP
-           * ------------------------------------------------
-           */}
-
-          {showHeatmap &&
-            gridData.length > 0 && (
-              <AqiHeatmapLayer
-                gridData={gridData}
-                visible={showHeatmap}
-                cellSizeMeters={500}
-              />
-            )}
-
-          {/*
-           * ------------------------------------------------
-           * SELECTED ROUTE
-           * ------------------------------------------------
-           */}
-
-          {routeGeoJSON && (
-            <ShapeSource
-              id="route-detail-source"
-              shape={routeGeoJSON}
-            >
-              <LineLayer
-                id="route-detail-line"
-                style={{
-                  lineColor: "#1a73e8",
-
-                  lineWidth: 5,
-
-                  lineCap: "round",
-
-                  lineJoin: "round",
-
-                  lineOpacity: 0.95,
-                }}
-              />
-            </ShapeSource>
-          )}
-
-          {/*
-           * ------------------------------------------------
-           * ROUTE AQI HOTSPOTS
-           * ------------------------------------------------
-           */}
-
-          {hotspotGeoJSON.features
-            .length > 0 && (
-            <ShapeSource
-              id="route-hotspots-source"
-              shape={hotspotGeoJSON}
-            >
-              <CircleLayer
-                id="route-hotspots-layer"
-                style={{
-                  circleColor:
-                    getAqiColorExpression(),
-
-                  circleRadius: [
-                    "interpolate",
-                    ["linear"],
-                    ["get", "aqi"],
-
-                    150,
-                    10,
-
-                    200,
-                    13,
-
-                    300,
-                    17,
-
-                    500,
-                    21,
-                  ],
-
-                  circleOpacity: 0.5,
-
-                  circleStrokeColor: [
-                    "case",
-
-                    ["get", "isHotspot"],
-
-                    "#d93025",
-
-                    "rgba(0,0,0,0)",
-                  ],
-
-                  circleStrokeWidth: [
-                    "case",
-
-                    ["get", "isHotspot"],
-
-                    2,
-
-                    0,
-                  ],
-                }}
-              />
-            </ShapeSource>
-          )}
-
-          {/*
-           * ------------------------------------------------
-           * START MARKER
-           * ------------------------------------------------
-           */}
-
-          <PointAnnotation
-            id="route-detail-start"
-            coordinate={[
-              startCoord.longitude,
-              startCoord.latitude,
-            ]}
+          <View
+            style={
+              styles.mapHeader
+            }
           >
-            <View
-              style={[
-                styles.mapMarker,
-                styles.startMarker,
-              ]}
-            >
-              <View
-                style={styles.markerDot}
-              />
+            <View>
+              <Text
+                style={
+                  styles.mapTitle
+                }
+              >
+                Selected Route
+              </Text>
+
+              <Text
+                style={
+                  styles.mapSubtitle
+                }
+              >
+                Selected route shown
+                prominently
+              </Text>
             </View>
-          </PointAnnotation>
 
-          {/*
-           * ------------------------------------------------
-           * END MARKER
-           * ------------------------------------------------
-           */}
-
-          <PointAnnotation
-            id="route-detail-end"
-            coordinate={[
-              endCoord.longitude,
-              endCoord.latitude,
-            ]}
-          >
-            <View
-              style={[
-                styles.mapMarker,
-                styles.endMarker,
-              ]}
-            >
+            {recommended && (
               <View
-                style={styles.markerDot}
-              />
-            </View>
-          </PointAnnotation>
-        </MapView>
-
-        {/*
-         * ----------------------------------------------------
-         * MAP TOOLBAR
-         * ----------------------------------------------------
-         */}
-
-        <View style={styles.toolbar}>
-          <View style={styles.toggleRow}>
-            <Text style={styles.toggleLabel}>
-              AQI heatmap
-            </Text>
-
-            <Switch
-              value={showHeatmap}
-              onValueChange={
-                setShowHeatmap
-              }
-              trackColor={{
-                true: "#1e8e3e",
-                false: "#dadce0",
-              }}
-              thumbColor="#ffffff"
-            />
-
-            {loadingGrid && (
-              <ActivityIndicator
-                size="small"
-                color="#1e8e3e"
-                style={{
-                  marginLeft: 6,
-                }}
-              />
+                style={
+                  styles.mapRecommendedBadge
+                }
+              >
+                <Text
+                  style={
+                    styles.mapRecommendedBadgeText
+                  }
+                >
+                  ★ RECOMMENDED
+                </Text>
+              </View>
             )}
           </View>
 
-          <TouchableOpacity
-            style={styles.advisoryFab}
-            onPress={() =>
-              setAdvisoryVisible(true)
+          <View
+            style={
+              styles.mapContainer
+            }
+          >
+            <RouteMap
+              routes={allRoutes}
+              selectedRouteId={
+                selectedRouteId
+              }
+              origin={
+                routeResponse?.origin
+              }
+              destination={
+                routeResponse?.destination
+              }
+              focusSelectedRoute={
+                true
+              }
+            />
+
+            <View
+              style={
+                styles.selectedMapOverlay
+              }
+            >
+              <View
+                style={
+                  styles.selectedMapDot
+                }
+              />
+
+              <Text
+                style={
+                  styles.selectedMapText
+                }
+              >
+                Selected route
+              </Text>
+            </View>
+          </View>
+        </View>
+
+        {/* ==================================================
+            RECOMMENDED BANNER
+            ================================================== */}
+
+        {recommended && (
+          <View
+            style={styles.bestBanner}
+          >
+            <View
+              style={
+                styles.bestBannerIcon
+              }
+            >
+              <Text
+                style={
+                  styles.bestBannerIconText
+                }
+              >
+                ★
+              </Text>
+            </View>
+
+            <View
+              style={
+                styles.bestBannerContent
+              }
+            >
+              <Text
+                style={
+                  styles.bestBannerTitle
+                }
+              >
+                Recommended Route
+              </Text>
+
+              <Text
+                style={
+                  styles.bestBannerText
+                }
+              >
+                Lowest estimated
+                exposure within the
+                acceptable travel-time
+                detour.
+              </Text>
+            </View>
+          </View>
+        )}
+
+        {/* ==================================================
+            HEADER
+            ================================================== */}
+
+        <View
+          style={styles.header}
+        >
+          <View
+            style={
+              styles.headerTitleRow
             }
           >
             <Text
               style={
-                styles.advisoryFabText
+                styles.routeTitle
               }
             >
-              📋
+              {recommended
+                ? "Best Route"
+                : "Route Details"}
             </Text>
-          </TouchableOpacity>
-        </View>
-      </View>
 
-      {/*
-       * ------------------------------------------------------
-       * DETAILS PANEL
-       * ------------------------------------------------------
-       */}
+            {recommended && (
+              <View
+                style={
+                  styles.headerBadge
+                }
+              >
+                <Text
+                  style={
+                    styles.headerBadgeText
+                  }
+                >
+                  RECOMMENDED
+                </Text>
+              </View>
+            )}
+          </View>
 
-      <View style={styles.panel}>
-        <View style={styles.panelHeader}>
           <Text
-            style={styles.routeSummary}
+            style={styles.routeId}
           >
-            {routeData.summary ||
-              "Selected route"}{" "}
-            · {durationMin} min ·{" "}
-            {totalDistanceKm.toFixed(1)} km
+            {routeData?.routeId ||
+              routeData?.id ||
+              "Route"}
           </Text>
 
-          {routeData.isRecommended && (
-            <View style={styles.recBadge}>
-              <Text style={styles.recText}>
-                ★ Recommended
-              </Text>
-            </View>
+          {routeData?.summary && (
+            <Text
+              style={
+                styles.routeSummary
+              }
+            >
+              {routeData.summary}
+            </Text>
           )}
         </View>
 
-        <ScrollView
-          contentContainerStyle={
-            styles.panelContent
-          }
-          showsVerticalScrollIndicator={
-            false
+        {/* ==================================================
+            BASIC SUMMARY
+            ================================================== */}
+
+        <View
+          style={
+            styles.summaryGrid
           }
         >
-          {/*
-           * ------------------------------------------------
-           * STATS
-           * ------------------------------------------------
-           */}
+          <SummaryCard
+            icon="📍"
+            label="Distance"
+            value={formatDistance(
+              distance
+            )}
+          />
 
-          <View style={styles.statsRow}>
-            <View style={styles.statBox}>
+          <SummaryCard
+            icon="⏱"
+            label="Travel Time"
+            value={formatDuration(
+              duration
+            )}
+          />
+        </View>
+
+        {/* ==================================================
+            AIR QUALITY
+            ================================================== */}
+
+        <View
+          style={styles.section}
+        >
+          <Text
+            style={
+              styles.sectionTitle
+            }
+          >
+            Air Quality
+          </Text>
+
+          <View
+            style={
+              styles.aqiOverview
+            }
+          >
+            <View
+              style={styles.aqiMain}
+            >
               <Text
-                style={styles.statLabel}
+                style={styles.label}
               >
-                Exposure
+                Average AQI
               </Text>
 
               <Text
                 style={[
-                  styles.statValue,
-
+                  styles.aqiMainValue,
                   {
                     color:
-                      routeData.exposureBand ===
-                      "Low"
-                        ? "#1e8e3e"
-                        : routeData.exposureBand ===
-                            "Moderate"
-                          ? "#f9ab00"
-                          : "#d93025",
+                      getAqiColor(
+                        averageAqi
+                      ),
                   },
                 ]}
               >
-                {routeData.exposureBand ||
-                  "—"}
+                {isValidNumber(
+                  averageAqi
+                )
+                  ? Math.round(
+                      Number(
+                        averageAqi
+                      )
+                    )
+                  : "—"}
+              </Text>
+
+              <Text
+                style={[
+                  styles.aqiCategory,
+                  {
+                    color:
+                      getAqiColor(
+                        averageAqi
+                      ),
+                  },
+                ]}
+              >
+                {averageAqiLabel}
               </Text>
             </View>
 
-            <View style={styles.statBox}>
+            <View
+              style={styles.aqiMain}
+            >
               <Text
-                style={styles.statLabel}
-              >
-                Avg AQI
-              </Text>
-
-              <Text
-                style={styles.statValue}
-              >
-                {routeData.avgAqi ||
-                  "—"}
-              </Text>
-            </View>
-
-            <View style={styles.statBox}>
-              <Text
-                style={styles.statLabel}
+                style={styles.label}
               >
                 Peak AQI
               </Text>
 
               <Text
                 style={[
-                  styles.statValue,
-
-                  routeData.peakAqi >
-                    200 && {
-                    color: "#d93025",
-                    fontWeight: "bold",
+                  styles.aqiMainValue,
+                  {
+                    color:
+                      getAqiColor(
+                        peakAqi
+                      ),
                   },
                 ]}
               >
-                {routeData.peakAqi ||
-                  "—"}
+                {isValidNumber(
+                  peakAqi
+                )
+                  ? Math.round(
+                      Number(
+                        peakAqi
+                      )
+                    )
+                  : "—"}
               </Text>
-            </View>
-
-            <View style={styles.statBox}>
-              <Text
-                style={styles.statLabel}
-              >
-                Dose
-              </Text>
 
               <Text
-                style={styles.statValue}
+                style={[
+                  styles.aqiCategory,
+                  {
+                    color:
+                      getAqiColor(
+                        peakAqi
+                      ),
+                  },
+                ]}
               >
-                {routeData.exposureScorePerHour ||
-                  "—"}
+                {peakAqiLabel}
               </Text>
             </View>
           </View>
 
-          {/*
-           * ------------------------------------------------
-           * AQI TIMELINE
-           * ------------------------------------------------
-           */}
+          <View
+            style={
+              styles.coverageCard
+            }
+          >
+            <View>
+              <Text
+                style={
+                  styles.coverageLabel
+                }
+              >
+                AQI Coverage
+              </Text>
 
-          <View style={styles.section}>
-            <Text
-              style={styles.sectionTitle}
-            >
-              🗺️ AQI along route
-            </Text>
-
-            <Text
-              style={styles.sectionSub}
-            >
-              Sample points every ~400m ·
-              Profile threshold AQI{" "}
-              {hotspotThreshold}
-            </Text>
+              <Text
+                style={
+                  styles.coverageValue
+                }
+              >
+                {formatPercent(
+                  coverage
+                )}
+              </Text>
+            </View>
 
             <View
               style={
-                styles.timelineContainer
+                styles.coverageInfo
+              }
+            >
+              <Text
+                style={
+                  styles.coverageInfoText
+                }
+              >
+                Coverage indicates how
+                much of the route had
+                usable AQI data.
+              </Text>
+            </View>
+          </View>
+        </View>
+
+        {/* ==================================================
+            EXPOSURE
+            ================================================== */}
+
+        <View
+          style={styles.section}
+        >
+          <Text
+            style={
+              styles.sectionTitle
+            }
+          >
+            Pollution Exposure
+          </Text>
+
+          <View
+            style={[
+              styles.exposureCard,
+              {
+                backgroundColor:
+                  exposureBackground,
+              },
+            ]}
+          >
+            <View
+              style={
+                styles.exposureHeader
+              }
+            >
+              <View>
+                <Text
+                  style={
+                    styles.exposureLabel
+                  }
+                >
+                  Exposure Band
+                </Text>
+
+                <Text
+                  style={[
+                    styles.exposureBand,
+                    {
+                      color:
+                        exposureColor,
+                    },
+                  ]}
+                >
+                  {String(
+                    exposureBand
+                  ).toUpperCase()}
+                </Text>
+              </View>
+
+              <Text
+                style={
+                  styles.exposureIcon
+                }
+              >
+                🌿
+              </Text>
+            </View>
+
+            <View
+              style={
+                styles.exposureMetrics
               }
             >
               <View
                 style={
-                  styles.timelineTrack
+                  styles.exposureMetric
+                }
+              >
+                <Text
+                  style={
+                    styles.metricLabel
+                  }
+                >
+                  Exposure Score
+                </Text>
+
+                <Text
+                  style={
+                    styles.metricValue
+                  }
+                >
+                  {isValidNumber(
+                    exposureScore
+                  )
+                    ? Math.round(
+                        Number(
+                          exposureScore
+                        )
+                      ).toLocaleString()
+                    : "—"}
+                </Text>
+              </View>
+
+              {isValidNumber(
+                exposurePerHour
+              ) && (
+                <View
+                  style={
+                    styles.exposureMetric
+                  }
+                >
+                  <Text
+                    style={
+                      styles.metricLabel
+                    }
+                  >
+                    Per Hour
+                  </Text>
+
+                  <Text
+                    style={
+                      styles.metricValue
+                    }
+                  >
+                    {Math.round(
+                      Number(
+                        exposurePerHour
+                      )
+                    ).toLocaleString()}
+                  </Text>
+                </View>
+              )}
+            </View>
+          </View>
+        </View>
+
+        {/* ==================================================
+            DETOUR
+            ================================================== */}
+
+        <View
+          style={styles.section}
+        >
+          <Text
+            style={
+              styles.sectionTitle
+            }
+          >
+            Travel-Time Trade-off
+          </Text>
+
+          <View
+            style={[
+              styles.detourCard,
+              detourAcceptable
+                ? styles.detourGood
+                : styles.detourWarning,
+            ]}
+          >
+            <Text
+              style={
+                styles.detourIcon
+              }
+            >
+              {detourAcceptable
+                ? "✓"
+                : "⚠"}
+            </Text>
+
+            <View
+              style={
+                styles.detourContent
+              }
+            >
+              <Text
+                style={[
+                  styles.detourTitle,
+                  {
+                    color:
+                      detourAcceptable
+                        ? "#176B2C"
+                        : "#B06000",
+                  },
+                ]}
+              >
+                {detourAcceptable
+                  ? "Within preferred detour"
+                  : "Outside preferred detour"}
+              </Text>
+
+              <Text
+                style={
+                  styles.detourText
+                }
+              >
+                {Number.isFinite(
+                  detourPercent
+                )
+                  ? `${
+                      detourPercent >= 0
+                        ? "+"
+                        : ""
+                    }${detourPercent.toFixed(
+                      1
+                    )}% travel-time detour`
+                  : "Detour information unavailable"}
+              </Text>
+            </View>
+          </View>
+        </View>
+
+        {/* ==================================================
+            HOTSPOTS
+            ================================================== */}
+
+        <View
+          style={styles.section}
+        >
+          <Text
+            style={
+              styles.sectionTitle
+            }
+          >
+            Pollution Hotspots
+          </Text>
+
+          <View
+            style={[
+              styles.hotspotSummary,
+              criticalHotspot &&
+                styles.criticalHotspotSummary,
+            ]}
+          >
+            <View
+              style={
+                styles.hotspotIcon
+              }
+            >
+              <Text
+                style={
+                  styles.hotspotIconText
+                }
+              >
+                {hotspotCount > 0
+                  ? "⚠"
+                  : "✓"}
+              </Text>
+            </View>
+
+            <View
+              style={
+                styles.hotspotSummaryContent
+              }
+            >
+              <Text
+                style={
+                  styles.hotspotTitle
+                }
+              >
+                {hotspotCount === 0
+                  ? "No hotspots detected"
+                  : criticalHotspot
+                  ? "Critical hotspot detected"
+                  : `${hotspotCount} hotspot${
+                      hotspotCount >
+                      1
+                        ? "s"
+                        : ""
+                    } detected`}
+              </Text>
+
+              {hotspotCount > 0 && (
+                <Text
+                  style={
+                    styles.hotspotMeta
+                  }
+                >
+                  Peak AQI{" "}
+                  {isValidNumber(
+                    hotspotPeak
+                  )
+                    ? hotspotPeak
+                    : "—"}
+                  {" · "}
+                  {isValidNumber(
+                    hotspotDuration
+                  )
+                    ? hotspotDuration.toFixed(
+                        1
+                      )
+                    : "—"}
+                  {" min · "}
+                  {isValidNumber(
+                    hotspotShare
+                  )
+                    ? hotspotShare.toFixed(
+                        1
+                      )
+                    : "—"}
+                  % exposure share
+                </Text>
+              )}
+            </View>
+          </View>
+
+          {hotspots.map(
+            (
+              hotspot,
+              index
+            ) => (
+              <View
+                key={
+                  hotspot?.id ||
+                  `${routeData?.routeId}-hotspot-${index}`
+                }
+                style={
+                  styles.hotspotItem
                 }
               >
                 <View
                   style={
-                    styles.timelineBar
+                    styles.hotspotItemHeader
                   }
                 >
-                  {timelineSegments.map(
-                    (seg) => (
-                      <View
-                        key={seg.i}
-                        style={{
-                          position:
-                            "absolute",
+                  <Text
+                    style={
+                      styles.hotspotItemTitle
+                    }
+                  >
+                    Hotspot {index + 1}
+                  </Text>
 
-                          left: `${Math.min(
-                            100,
-                            Math.max(
-                              0,
-                              seg.progressPercent
-                            )
-                          )}%`,
-
-                          top: 0,
-
-                          bottom: 0,
-
-                          width: 3,
-
-                          backgroundColor:
-                            aqiToColor(
-                              seg.aqi,
-                              1
-                            ),
-                        }}
-                      />
-                    )
+                  {hotspot?.critical && (
+                    <View
+                      style={
+                        styles.criticalBadge
+                      }
+                    >
+                      <Text
+                        style={
+                          styles.criticalBadgeText
+                        }
+                      >
+                        CRITICAL
+                      </Text>
+                    </View>
                   )}
                 </View>
-              </View>
 
-              {timelineSegments
-                .filter(
-                  (segment) =>
-                    segment.isHotspot
-                )
-                .slice(0, 5)
-                .map((hs) => (
+                <View
+                  style={
+                    styles.hotspotStats
+                  }
+                >
                   <View
-                    key={`hs-${hs.i}`}
                     style={
-                      styles.hotspotNote
+                      styles.hotspotStat
                     }
                   >
                     <Text
                       style={
-                        styles.hotspotNoteText
+                        styles.hotspotStatLabel
                       }
                     >
-                      ⚠ High AQI{" "}
-                      {hs.aqi} (
-                      {aqiLabel(hs.aqi)})
-                      at ~
-                      {Math.round(
-                        hs.distanceAlongRoute /
-                          1000
-                      )}
-                      km · ETA{" "}
-                      {hs.etaMin} min
+                      Peak AQI
+                    </Text>
+
+                    <Text
+                      style={[
+                        styles.hotspotStatValue,
+                        {
+                          color:
+                            getAqiColor(
+                              hotspot?.peakAqi ??
+                                hotspot?.maxAqi
+                            ),
+                        },
+                      ]}
+                    >
+                      {isValidNumber(
+                        hotspot?.peakAqi ??
+                          hotspot?.maxAqi
+                      )
+                        ? Number(
+                            hotspot?.peakAqi ??
+                              hotspot?.maxAqi
+                          )
+                        : "—"}
                     </Text>
                   </View>
-                ))}
 
-              {hotspots.length > 0 && (
-                <View
-                  style={
-                    styles.summaryList
-                  }
-                >
-                  <Text
-                    style={
-                      styles.summaryListTitle
-                    }
-                  >
-                    Hotspot segments:
-                  </Text>
-
-                  {hotspots.map(
-                    (h, i) => (
-                      <View
-                        key={i}
+                  {hotspot?.durationMinutes !==
+                    undefined && (
+                    <View
+                      style={
+                        styles.hotspotStat
+                      }
+                    >
+                      <Text
                         style={
-                          styles.summaryListItem
+                          styles.hotspotStatLabel
                         }
                       >
-                        <Text
-                          style={
-                            styles.summaryListItemText
-                          }
-                        >
-                          • Peak AQI{" "}
-                          {h.peakAqi} around{" "}
-                          {Math.round(
-                            h.startDistance /
-                              1000
-                          )}
-                          -
-                          {Math.round(
-                            (h.endDistance ||
-                              h.startDistance) /
-                              1000
-                          )}
-                          km into the
-                          route
-                        </Text>
-                      </View>
-                    )
+                        Duration
+                      </Text>
+
+                      <Text
+                        style={
+                          styles.hotspotStatValue
+                        }
+                      >
+                        {formatNumber(
+                          hotspot.durationMinutes,
+                          1
+                        )}{" "}
+                        min
+                      </Text>
+                    </View>
+                  )}
+
+                  {hotspot?.startDistanceMeters !==
+                    undefined && (
+                    <View
+                      style={
+                        styles.hotspotStat
+                      }
+                    >
+                      <Text
+                        style={
+                          styles.hotspotStatLabel
+                        }
+                      >
+                        Start
+                      </Text>
+
+                      <Text
+                        style={
+                          styles.hotspotStatValue
+                        }
+                      >
+                        {formatDistance(
+                          hotspot.startDistanceMeters
+                        )}
+                      </Text>
+                    </View>
                   )}
                 </View>
-              )}
 
-              {hotspots.length === 0 &&
-                !routeData.hasHotspotWarning && (
+                {hotspot?.critical && (
                   <Text
                     style={
-                      styles.noHotspotText
+                      styles.criticalText
                     }
                   >
-                    ✅ No hotspot segments
-                    detected for this
-                    profile.
+                    ⚠ Critical pollution
+                    zone
                   </Text>
                 )}
-            </View>
-          </View>
+              </View>
+            )
+          )}
+        </View>
 
-          {/*
-           * ------------------------------------------------
-           * ADVISORY BUTTON
-           * ------------------------------------------------
-           */}
+        {/* ==================================================
+            ENVIRONMENTAL ADVISORY
+            ================================================== */}
 
-          <TouchableOpacity
+        <View
+          style={styles.section}
+        >
+          <Text
             style={
-              styles.showFullAdvisoryButton
+              styles.sectionTitle
             }
-            onPress={() =>
-              setAdvisoryVisible(true)
+          >
+            Environmental Advisory
+          </Text>
+
+          <View
+            style={
+              styles.advisoryCard
             }
           >
             <Text
               style={
-                styles.showFullAdvisoryText
+                styles.advisoryLevel
               }
             >
-              Show full health advisory
+              {advisory?.title ||
+                "Environmental conditions"}
             </Text>
-          </TouchableOpacity>
 
-          <View style={{ height: 30 }} />
-        </ScrollView>
-      </View>
+            <Text
+              style={
+                styles.advisoryMessage
+              }
+            >
+              {advisory?.message ||
+                "Environmental air-quality information is available for this route."}
+            </Text>
+          </View>
+        </View>
 
-      {/*
-       * ------------------------------------------------------
-       * ADVISORY MODAL
-       * ------------------------------------------------------
-       */}
+        {/* ==================================================
+            AQI ALONG ROUTE
+            ================================================== */}
 
-      <AdvisoryModal
-        visible={advisoryVisible}
-        onClose={() =>
-          setAdvisoryVisible(false)
-        }
-        route={routeData}
-      />
+        <View
+          style={styles.section}
+        >
+          <View
+            style={
+              styles.sectionTitleRow
+            }
+          >
+            <Text
+              style={
+                styles.sectionTitle
+              }
+            >
+              AQI Along Route
+            </Text>
+
+            {aqiSegments.length >
+              20 && (
+              <Text
+                style={
+                  styles.segmentCount
+                }
+              >
+                First 20 points
+              </Text>
+            )}
+          </View>
+
+          {aqiSegments.length === 0 ? (
+            <Text
+              style={
+                styles.emptyText
+              }
+            >
+              AQI segment information
+              is unavailable.
+            </Text>
+          ) : (
+            aqiSegments
+              .slice(0, 20)
+              .map(
+                (
+                  segment,
+                  index
+                ) => (
+                  <View
+                    key={`${routeData?.routeId}-aqi-${index}`}
+                    style={
+                      styles.aqiSegment
+                    }
+                  >
+                    <View
+                      style={[
+                        styles.aqiDot,
+                        {
+                          backgroundColor:
+                            getAqiColor(
+                              segment?.aqi
+                            ),
+                        },
+                      ]}
+                    />
+
+                    <View
+                      style={
+                        styles.segmentContent
+                      }
+                    >
+                      <View
+                        style={
+                          styles.segmentTopRow
+                        }
+                      >
+                        <Text
+                          style={
+                            styles.segmentDistance
+                          }
+                        >
+                          {isValidNumber(
+                            segment?.distanceMeters
+                          )
+                            ? Math.round(
+                                Number(
+                                  segment.distanceMeters
+                                )
+                              ).toLocaleString()
+                            : "—"}
+                          {isValidNumber(
+                            segment?.distanceMeters
+                          )
+                            ? "m"
+                            : ""}
+                        </Text>
+
+                        <Text
+                          style={[
+                            styles.segmentAqiValue,
+                            {
+                              color:
+                                getAqiColor(
+                                  segment?.aqi
+                                ),
+                            },
+                          ]}
+                        >
+                          {isValidNumber(
+                            segment?.aqi
+                          )
+                            ? Math.round(
+                                Number(
+                                  segment.aqi
+                                )
+                              )
+                            : "—"}
+                        </Text>
+                      </View>
+
+                      <Text
+                        style={
+                          styles.segmentAqi
+                        }
+                      >
+                        {getAqiCategoryLabel(
+                          segment?.category,
+                          segment?.aqi
+                        )}
+                      </Text>
+
+                      {(segment?.source ||
+                        segment?.confidence !=
+                          null) && (
+                        <Text
+                          style={
+                            styles.segmentMeta
+                          }
+                        >
+                          {segment?.source
+                            ? `Source: ${segment.source}`
+                            : ""}
+                          {segment?.source &&
+                          segment?.confidence !=
+                            null
+                            ? " · "
+                            : ""}
+                          {segment?.confidence !=
+                          null
+                            ? `Confidence: ${segment.confidence}`
+                            : ""}
+                        </Text>
+                      )}
+                    </View>
+                  </View>
+                )
+              )
+          )}
+        </View>
+
+        {/* ==================================================
+            FINAL EXPLANATION
+            ================================================== */}
+
+        {recommended && (
+          <View
+            style={
+              styles.explanationCard
+            }
+          >
+            <Text
+              style={
+                styles.explanationTitle
+              }
+            >
+              Why this route?
+            </Text>
+
+            <Text
+              style={
+                styles.explanationText
+              }
+            >
+              AirRoute recommends this
+              route because it has the
+              lowest estimated pollution
+              exposure among routes that
+              satisfy the acceptable
+              travel-time detour
+              constraint.
+            </Text>
+          </View>
+        )}
+
+        <View
+          style={{
+            height: 20,
+          }}
+        />
+      </ScrollView>
     </SafeAreaView>
   );
 }
 
-/*
- * ============================================================
- * STYLES
- * ============================================================
- */
+// ============================================================
+// SUMMARY CARD
+// ============================================================
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#ffffff",
-  },
+function SummaryCard({
+  icon,
+  label,
+  value,
+}) {
+  return (
+    <View
+      style={
+        styles.summaryCard
+      }
+    >
+      <Text
+        style={
+          styles.summaryIcon
+        }
+      >
+        {icon}
+      </Text>
 
-  mapContainer: {
-    height: "45%",
-    position: "relative",
-  },
+      <Text
+        style={
+          styles.label
+        }
+      >
+        {label}
+      </Text>
 
-  map: {
-    ...StyleSheet.absoluteFillObject,
-  },
+      <Text
+        style={
+          styles.value
+        }
+      >
+        {value}
+      </Text>
+    </View>
+  );
+}
 
-  /*
-   * ----------------------------------------------------------
-   * MAP MARKERS
-   * ----------------------------------------------------------
-   */
+// ============================================================
+// STYLES
+// ============================================================
 
-  mapMarker: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 3,
-    borderColor: "#ffffff",
-  },
-
-  startMarker: {
-    backgroundColor: "#1e8e3e",
-  },
-
-  endMarker: {
-    backgroundColor: "#d93025",
-  },
-
-  markerDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: "#ffffff",
-  },
-
-  /*
-   * ----------------------------------------------------------
-   * TOOLBAR
-   * ----------------------------------------------------------
-   */
-
-  toolbar: {
-    position: "absolute",
-    top: 10,
-    left: 10,
-    right: 10,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
-  },
-
-  toggleRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor:
-      "rgba(255,255,255,0.95)",
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    shadowColor: "#000",
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    shadowOffset: {
-      width: 0,
-      height: 1,
+const styles =
+  StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor:
+        "#F7F8FA",
     },
-  },
 
-  toggleLabel: {
-    fontSize: 12,
-    fontWeight: "600",
-    color: "#202124",
-    marginRight: 8,
-  },
-
-  advisoryFab: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor: "#1a73e8",
-    alignItems: "center",
-    justifyContent: "center",
-    shadowColor: "#000",
-    shadowOpacity: 0.2,
-    shadowRadius: 6,
-    shadowOffset: {
-      width: 0,
-      height: 2,
+    content: {
+      padding: 16,
+      paddingBottom: 35,
     },
-  },
 
-  advisoryFabText: {
-    fontSize: 20,
-  },
+    // ========================================================
+    // MAP
+    // ========================================================
 
-  /*
-   * ----------------------------------------------------------
-   * PANEL
-   * ----------------------------------------------------------
-   */
+    mapSection: {
+      backgroundColor:
+        "#FFFFFF",
 
-  panel: {
-    flex: 1,
-    backgroundColor: "#ffffff",
-    borderTopLeftRadius: 18,
-    borderTopRightRadius: 18,
-    marginTop: -14,
-    overflow: "hidden",
-  },
+      borderRadius: 14,
 
-  panelHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    borderBottomWidth: 1,
-    borderBottomColor: "#f0f0f0",
-  },
+      overflow: "hidden",
 
-  routeSummary: {
-    flex: 1,
-    fontSize: 15,
-    fontWeight: "700",
-    color: "#202124",
-    marginRight: 8,
-  },
+      borderWidth: 1,
 
-  recBadge: {
-    backgroundColor: "#e6f4ea",
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 10,
-  },
+      borderColor:
+        "#E5E7EB",
 
-  recText: {
-    color: "#1e8e3e",
-    fontSize: 11,
-    fontWeight: "700",
-  },
+      marginBottom: 14,
 
-  panelContent: {
-    padding: 16,
-  },
+      elevation: 2,
 
-  /*
-   * ----------------------------------------------------------
-   * STATS
-   * ----------------------------------------------------------
-   */
+      shadowColor:
+        "#000",
 
-  statsRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    marginBottom: 16,
-  },
+      shadowOpacity:
+        0.05,
 
-  statBox: {
-    flex: 1,
-    alignItems: "center",
-    backgroundColor: "#f8f9fa",
-    paddingVertical: 12,
-    marginHorizontal: 4,
-    borderRadius: 10,
-  },
+      shadowRadius:
+        5,
 
-  statLabel: {
-    fontSize: 10,
-    color: "#5f6368",
-    marginBottom: 4,
-    textTransform: "uppercase",
-    letterSpacing: 0.3,
-  },
+      shadowOffset: {
+        width: 0,
+        height: 2,
+      },
+    },
 
-  statValue: {
-    fontSize: 16,
-    fontWeight: "700",
-    color: "#202124",
-  },
+    mapHeader: {
+      flexDirection:
+        "row",
 
-  /*
-   * ----------------------------------------------------------
-   * AQI SECTION
-   * ----------------------------------------------------------
-   */
+      alignItems:
+        "center",
 
-  section: {
-    marginBottom: 18,
-  },
+      justifyContent:
+        "space-between",
 
-  sectionTitle: {
-    fontSize: 15,
-    fontWeight: "700",
-    color: "#202124",
-    marginBottom: 4,
-  },
+      paddingHorizontal: 14,
 
-  sectionSub: {
-    fontSize: 12,
-    color: "#5f6368",
-    marginBottom: 12,
-  },
+      paddingVertical: 12,
 
-  timelineContainer: {},
+      borderBottomWidth: 1,
 
-  timelineTrack: {
-    height: 28,
-    backgroundColor: "#f8f9fa",
-    borderRadius: 6,
-    overflow: "hidden",
-    marginBottom: 12,
-  },
+      borderBottomColor:
+        "#EEF0F2",
+    },
 
-  timelineBar: {
-    position: "relative",
-    flex: 1,
-    width: "100%",
-  },
+    mapTitle: {
+      fontSize: 17,
 
-  hotspotNote: {
-    backgroundColor: "#fce8e6",
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 6,
-    marginBottom: 6,
-  },
+      fontWeight:
+        "800",
 
-  hotspotNoteText: {
-    fontSize: 12,
-    color: "#d93025",
-    fontWeight: "600",
-  },
+      color:
+        "#202124",
+    },
 
-  noHotspotText: {
-    marginTop: 6,
-    color: "#1e8e3e",
-    fontSize: 13,
-    fontWeight: "600",
-  },
+    mapSubtitle: {
+      marginTop: 2,
 
-  summaryList: {
-    marginTop: 10,
-  },
+      fontSize: 10,
 
-  summaryListTitle: {
-    fontSize: 13,
-    fontWeight: "600",
-    color: "#202124",
-    marginBottom: 4,
-  },
+      color:
+        "#7A8087",
+    },
 
-  summaryListItem: {
-    marginBottom: 2,
-  },
+    mapRecommendedBadge: {
+      backgroundColor:
+        "#E6F4EA",
 
-  summaryListItemText: {
-    fontSize: 12,
-    color: "#5f6368",
-    lineHeight: 18,
-  },
+      paddingHorizontal: 8,
 
-  /*
-   * ----------------------------------------------------------
-   * ADVISORY BUTTON
-   * ----------------------------------------------------------
-   */
+      paddingVertical: 5,
 
-  showFullAdvisoryButton: {
-    backgroundColor: "#1a73e8",
-    paddingVertical: 14,
-    borderRadius: 10,
-    alignItems: "center",
-  },
+      borderRadius: 9,
+    },
 
-  showFullAdvisoryText: {
-    color: "#ffffff",
-    fontSize: 14,
-    fontWeight: "700",
-  },
+    mapRecommendedBadgeText: {
+      color:
+        "#176B2C",
 
-  /*
-   * ----------------------------------------------------------
-   * EMPTY STATE
-   * ----------------------------------------------------------
-   */
+      fontSize: 8,
 
-  emptyContainer: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 20,
-  },
+      fontWeight:
+        "900",
+    },
 
-  emptyTitle: {
-    fontSize: 18,
-    color: "#202124",
-    fontWeight: "600",
-    marginBottom: 12,
-  },
+    mapContainer: {
+      height: 310,
 
-  backLink: {
-    color: "#1a73e8",
-    fontSize: 14,
-    fontWeight: "600",
-  },
-});
+      position:
+        "relative",
+    },
+
+    selectedMapOverlay: {
+      position:
+        "absolute",
+
+      left: 12,
+
+      bottom: 12,
+
+      flexDirection:
+        "row",
+
+      alignItems:
+        "center",
+
+      backgroundColor:
+        "rgba(255,255,255,0.95)",
+
+      paddingHorizontal: 10,
+
+      paddingVertical: 7,
+
+      borderRadius: 10,
+
+      elevation: 3,
+
+      shadowColor:
+        "#000",
+
+      shadowOpacity:
+        0.12,
+
+      shadowRadius:
+        4,
+
+      shadowOffset: {
+        width: 0,
+
+        height: 2,
+      },
+    },
+
+    selectedMapDot: {
+      width: 9,
+
+      height: 9,
+
+      borderRadius: 5,
+
+      backgroundColor:
+        "#1769AA",
+
+      marginRight: 6,
+    },
+
+    selectedMapText: {
+      fontSize: 10,
+
+      fontWeight:
+        "800",
+
+      color:
+        "#1769AA",
+    },
+
+    // ========================================================
+    // BANNER
+    // ========================================================
+
+    bestBanner: {
+      flexDirection:
+        "row",
+
+      backgroundColor:
+        "#E6F4EA",
+
+      borderRadius: 14,
+
+      padding: 14,
+
+      marginBottom: 14,
+
+      borderWidth: 1,
+
+      borderColor:
+        "#B7DFC0",
+    },
+
+    bestBannerIcon: {
+      width: 34,
+
+      height: 34,
+
+      borderRadius: 17,
+
+      backgroundColor:
+        "#FFFFFF",
+
+      alignItems:
+        "center",
+
+      justifyContent:
+        "center",
+
+      marginRight: 10,
+    },
+
+    bestBannerIconText: {
+      color:
+        "#1E8E3E",
+
+      fontSize: 18,
+
+      fontWeight:
+        "800",
+    },
+
+    bestBannerContent: {
+      flex: 1,
+    },
+
+    bestBannerTitle: {
+      color:
+        "#1E8E3E",
+
+      fontSize: 16,
+
+      fontWeight:
+        "800",
+    },
+
+    bestBannerText: {
+      marginTop: 5,
+
+      color:
+        "#276738",
+
+      fontSize: 13,
+
+      lineHeight: 19,
+    },
+
+    // ========================================================
+    // HEADER
+    // ========================================================
+
+    header: {
+      marginBottom: 14,
+    },
+
+    headerTitleRow: {
+      flexDirection:
+        "row",
+
+      alignItems:
+        "center",
+
+      flexWrap:
+        "wrap",
+    },
+
+    routeTitle: {
+      fontSize: 23,
+
+      fontWeight:
+        "800",
+
+      color:
+        "#202124",
+    },
+
+    headerBadge: {
+      marginLeft: 8,
+
+      backgroundColor:
+        "#E6F4EA",
+
+      paddingHorizontal:
+        8,
+
+      paddingVertical:
+        4,
+
+      borderRadius: 10,
+    },
+
+    headerBadgeText: {
+      color:
+        "#176B2C",
+
+      fontSize: 8,
+
+      fontWeight:
+        "800",
+    },
+
+    routeId: {
+      marginTop: 4,
+
+      fontSize: 10,
+
+      color:
+        "#9AA0A6",
+    },
+
+    routeSummary: {
+      marginTop: 5,
+
+      fontSize: 13,
+
+      lineHeight: 19,
+
+      color:
+        "#5F6368",
+    },
+
+    // ========================================================
+    // SUMMARY
+    // ========================================================
+
+    summaryGrid: {
+      flexDirection:
+        "row",
+
+      gap: 10,
+    },
+
+    summaryCard: {
+      flex: 1,
+
+      backgroundColor:
+        "#FFFFFF",
+
+      borderRadius: 12,
+
+      padding: 15,
+
+      borderWidth: 1,
+
+      borderColor:
+        "#E5E7EB",
+    },
+
+    summaryIcon: {
+      fontSize: 17,
+
+      marginBottom: 5,
+    },
+
+    label: {
+      fontSize: 11,
+
+      color:
+        "#6B7280",
+
+      marginBottom: 4,
+    },
+
+    value: {
+      fontSize: 18,
+
+      fontWeight:
+        "800",
+
+      color:
+        "#202124",
+    },
+
+    // ========================================================
+    // SECTION
+    // ========================================================
+
+    section: {
+      marginTop: 16,
+
+      backgroundColor:
+        "#FFFFFF",
+
+      borderRadius: 14,
+
+      padding: 15,
+
+      borderWidth: 1,
+
+      borderColor:
+        "#E5E7EB",
+    },
+
+    sectionTitleRow: {
+      flexDirection:
+        "row",
+
+      justifyContent:
+        "space-between",
+
+      alignItems:
+        "center",
+
+      marginBottom: 12,
+    },
+
+    sectionTitle: {
+      fontSize: 17,
+
+      fontWeight:
+        "800",
+
+      color:
+        "#202124",
+
+      marginBottom: 12,
+    },
+
+    segmentCount: {
+      fontSize: 10,
+
+      color:
+        "#9AA0A6",
+
+      marginBottom: 12,
+    },
+
+    // ========================================================
+    // AQI
+    // ========================================================
+
+    aqiOverview: {
+      flexDirection:
+        "row",
+
+      justifyContent:
+        "space-around",
+    },
+
+    aqiMain: {
+      alignItems:
+        "center",
+
+      flex: 1,
+    },
+
+    aqiMainValue: {
+      fontSize: 30,
+
+      fontWeight:
+        "800",
+
+      marginTop: 2,
+    },
+
+    aqiCategory: {
+      marginTop: 3,
+
+      fontSize: 11,
+
+      fontWeight:
+        "700",
+
+      textAlign:
+        "center",
+    },
+
+    coverageCard: {
+      flexDirection:
+        "row",
+
+      alignItems:
+        "center",
+
+      marginTop: 16,
+
+      paddingTop: 13,
+
+      borderTopWidth: 1,
+
+      borderTopColor:
+        "#EEF0F2",
+    },
+
+    coverageLabel: {
+      fontSize: 10,
+
+      color:
+        "#6B7280",
+
+      textTransform:
+        "uppercase",
+
+      fontWeight:
+        "700",
+    },
+
+    coverageValue: {
+      marginTop: 3,
+
+      fontSize: 16,
+
+      fontWeight:
+        "800",
+
+      color:
+        "#202124",
+    },
+
+    coverageInfo: {
+      flex: 1,
+
+      marginLeft: 18,
+    },
+
+    coverageInfoText: {
+      fontSize: 11,
+
+      lineHeight: 16,
+
+      color:
+        "#6B7280",
+    },
+
+    // ========================================================
+    // EXPOSURE
+    // ========================================================
+
+    exposureCard: {
+      borderRadius: 12,
+
+      padding: 14,
+    },
+
+    exposureHeader: {
+      flexDirection:
+        "row",
+
+      justifyContent:
+        "space-between",
+
+      alignItems:
+        "center",
+    },
+
+    exposureLabel: {
+      fontSize: 10,
+
+      color:
+        "#6B7280",
+
+      textTransform:
+        "uppercase",
+
+      fontWeight:
+        "700",
+    },
+
+    exposureBand: {
+      marginTop: 4,
+
+      fontSize: 17,
+
+      fontWeight:
+        "900",
+    },
+
+    exposureIcon: {
+      fontSize: 27,
+    },
+
+    exposureMetrics: {
+      flexDirection:
+        "row",
+
+      marginTop: 14,
+
+      paddingTop: 12,
+
+      borderTopWidth: 1,
+
+      borderTopColor:
+        "rgba(0,0,0,0.08)",
+    },
+
+    exposureMetric: {
+      flex: 1,
+    },
+
+    metricLabel: {
+      fontSize: 10,
+
+      color:
+        "#6B7280",
+
+      textTransform:
+        "uppercase",
+
+      fontWeight:
+        "700",
+    },
+
+    metricValue: {
+      marginTop: 3,
+
+      fontSize: 16,
+
+      fontWeight:
+        "800",
+
+      color:
+        "#202124",
+    },
+
+    // ========================================================
+    // DETOUR
+    // ========================================================
+
+    detourCard: {
+      flexDirection:
+        "row",
+
+      alignItems:
+        "center",
+
+      borderRadius: 11,
+
+      padding: 13,
+
+      borderWidth: 1,
+    },
+
+    detourGood: {
+      backgroundColor:
+        "#E6F4EA",
+
+      borderColor:
+        "#B7DFC0",
+    },
+
+    detourWarning: {
+      backgroundColor:
+        "#FFF4E5",
+
+      borderColor:
+        "#F2D19B",
+    },
+
+    detourIcon: {
+      fontSize: 20,
+
+      marginRight: 10,
+    },
+
+    detourContent: {
+      flex: 1,
+    },
+
+    detourTitle: {
+      fontSize: 13,
+
+      fontWeight:
+        "800",
+    },
+
+    detourText: {
+      marginTop: 3,
+
+      fontSize: 12,
+
+      color:
+        "#5F6368",
+    },
+
+    // ========================================================
+    // HOTSPOTS
+    // ========================================================
+
+    hotspotSummary: {
+      flexDirection:
+        "row",
+
+      alignItems:
+        "center",
+
+      backgroundColor:
+        "#F8FAFC",
+
+      borderRadius: 11,
+
+      padding: 12,
+
+      borderWidth: 1,
+
+      borderColor:
+        "#E5E7EB",
+    },
+
+    criticalHotspotSummary: {
+      backgroundColor:
+        "#FCE8E6",
+
+      borderColor:
+        "#F3B7B2",
+    },
+
+    hotspotIcon: {
+      width: 34,
+
+      height: 34,
+
+      borderRadius: 17,
+
+      backgroundColor:
+        "#FFFFFF",
+
+      alignItems:
+        "center",
+
+      justifyContent:
+        "center",
+
+      marginRight: 10,
+    },
+
+    hotspotIconText: {
+      fontSize: 17,
+    },
+
+    hotspotSummaryContent: {
+      flex: 1,
+    },
+
+    hotspotTitle: {
+      fontSize: 13,
+
+      fontWeight:
+        "800",
+
+      color:
+        "#202124",
+    },
+
+    hotspotMeta: {
+      marginTop: 4,
+
+      fontSize: 11,
+
+      color:
+        "#5F6368",
+    },
+
+    hotspotItem: {
+      marginTop: 10,
+
+      padding: 12,
+
+      backgroundColor:
+        "#FAFAFA",
+
+      borderRadius: 9,
+
+      borderWidth: 1,
+
+      borderColor:
+        "#EEEEEE",
+    },
+
+    hotspotItemHeader: {
+      flexDirection:
+        "row",
+
+      justifyContent:
+        "space-between",
+
+      alignItems:
+        "center",
+    },
+
+    hotspotItemTitle: {
+      fontSize: 13,
+
+      fontWeight:
+        "700",
+
+      color:
+        "#202124",
+    },
+
+    criticalBadge: {
+      backgroundColor:
+        "#FCE8E6",
+
+      paddingHorizontal:
+        7,
+
+      paddingVertical:
+        3,
+
+      borderRadius: 8,
+    },
+
+    criticalBadgeText: {
+      color:
+        "#B31412",
+
+      fontSize: 8,
+
+      fontWeight:
+        "900",
+    },
+
+    hotspotStats: {
+      flexDirection:
+        "row",
+
+      marginTop: 10,
+
+      paddingTop: 9,
+
+      borderTopWidth: 1,
+
+      borderTopColor:
+        "#EEEEEE",
+    },
+
+    hotspotStat: {
+      flex: 1,
+    },
+
+    hotspotStatLabel: {
+      fontSize: 9,
+
+      color:
+        "#7A8087",
+
+      textTransform:
+        "uppercase",
+
+      fontWeight:
+        "600",
+    },
+
+    hotspotStatValue: {
+      marginTop: 3,
+
+      fontSize: 12,
+
+      fontWeight:
+        "800",
+
+      color:
+        "#202124",
+    },
+
+    criticalText: {
+      marginTop: 8,
+
+      color:
+        "#D93025",
+
+      fontSize: 12,
+
+      fontWeight:
+        "700",
+    },
+
+    // ========================================================
+    // ADVISORY
+    // ========================================================
+
+    advisoryCard: {
+      backgroundColor:
+        "#F8FAFC",
+
+      borderRadius: 10,
+
+      padding: 14,
+
+      borderLeftWidth: 4,
+
+      borderLeftColor:
+        "#1A73E8",
+    },
+
+    advisoryLevel: {
+      fontSize: 15,
+
+      fontWeight:
+        "800",
+
+      color:
+        "#202124",
+    },
+
+    advisoryMessage: {
+      marginTop: 6,
+
+      fontSize: 13,
+
+      lineHeight: 19,
+
+      color:
+        "#5F6368",
+    },
+
+    // ========================================================
+    // AQI SEGMENTS
+    // ========================================================
+
+    aqiSegment: {
+      flexDirection:
+        "row",
+
+      alignItems:
+        "center",
+
+      paddingVertical: 9,
+
+      borderBottomWidth: 1,
+
+      borderBottomColor:
+        "#F0F0F0",
+    },
+
+    aqiDot: {
+      width: 12,
+
+      height: 12,
+
+      borderRadius: 6,
+
+      marginRight: 10,
+    },
+
+    segmentContent: {
+      flex: 1,
+    },
+
+    segmentTopRow: {
+      flexDirection:
+        "row",
+
+      justifyContent:
+        "space-between",
+
+      alignItems:
+        "center",
+    },
+
+    segmentDistance: {
+      fontSize: 12,
+
+      color:
+        "#5F6368",
+    },
+
+    segmentAqiValue: {
+      fontSize: 14,
+
+      fontWeight:
+        "900",
+    },
+
+    segmentAqi: {
+      marginTop: 2,
+
+      fontSize: 12,
+
+      fontWeight:
+        "700",
+
+      color:
+        "#202124",
+    },
+
+    segmentMeta: {
+      marginTop: 3,
+
+      fontSize: 9,
+
+      color:
+        "#9AA0A6",
+    },
+
+    emptyText: {
+      color:
+        "#6B7280",
+
+      fontSize: 13,
+
+      lineHeight: 19,
+    },
+
+    // ========================================================
+    // EXPLANATION
+    // ========================================================
+
+    explanationCard: {
+      marginTop: 16,
+
+      backgroundColor:
+        "#E8F0FE",
+
+      borderRadius: 13,
+
+      padding: 15,
+
+      borderWidth: 1,
+
+      borderColor:
+        "#C9D9F2",
+    },
+
+    explanationTitle: {
+      fontSize: 14,
+
+      fontWeight:
+        "800",
+
+      color:
+        "#174EA6",
+    },
+
+    explanationText: {
+      marginTop: 6,
+
+      fontSize: 12,
+
+      lineHeight: 19,
+
+      color:
+        "#405777",
+    },
+  });
